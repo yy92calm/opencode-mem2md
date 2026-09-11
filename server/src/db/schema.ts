@@ -14,6 +14,9 @@ export function initDb(dbPath: string): Database.Database {
   db.pragma('journal_mode = WAL');
   db.pragma('foreign_keys = ON');
   db.pragma('synchronous = NORMAL');
+  // WAL allows a single writer; without this a second writer (backfill script
+  // running next to the live service) fails instantly with SQLITE_BUSY.
+  db.pragma('busy_timeout = 5000');
 
   db.exec(SCHEMA);
   migrate(db);

@@ -1,0 +1,9 @@
+/home/ubuntu/workspace/opencode-mem2md/server/logs/worker.log {
+    daily
+    rotate 14
+    compress
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+}

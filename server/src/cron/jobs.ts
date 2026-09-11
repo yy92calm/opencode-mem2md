@@ -11,7 +11,7 @@ import {
   getMaxHardId,
   countHardSince,
   countHard,
-  pruneRawOlderThan,
+  pruneSummarizedRawOlderThan,
   getDistillState,
   setDistillState,
   maxRawIdByDate,
@@ -118,7 +118,15 @@ export async function runDailySummaryForUser(user_id: string, date: string = yes
       return false;
     }
     const raws = listRawByDate(user_id, date);
-    const result = await generateDailySummary(user_id, date, raws);
+    // A failing summary must not abort the whole job: previously the throw
+    // propagated past the distill block below, so one dead LLM endpoint took
+    // out both pipelines and left no trace in distill_state.
+    let result: Awaited<ReturnType<typeof generateDailySummary>> = null;
+    try {
+      result = await generateDailySummary(user_id, date, raws);
+    } catch (e) {
+      log('error', `daily summary failed`, { user_id, date, error: String(e) });
+    }
     if (result) {
       upsertDailySummary({
         user_id,
@@ -287,12 +295,14 @@ async function doRegenerateProfile(user_id: string, reason: string): Promise<voi
 }
 
 /**
- * Optional cleanup: drop raw conversations older than 90 days
- * (summaries and hard memories are kept forever).
+ * Cleanup: drop raw conversations older than 90 days, but only for days that
+ * were actually summarized (summaries and hard memories are kept forever).
+ * A day whose summary never got generated keeps its raws so it stays
+ * backfillable instead of being silently destroyed by the retention window.
  */
 export async function runRawPrune(): Promise<void> {
-  const deleted = pruneRawOlderThan(90);
-  log('info', `prune raw`, { deleted });
+  const { deleted, retained_days } = pruneSummarizedRawOlderThan(90);
+  log('info', `prune raw`, { deleted, retained_unsummarized_days: retained_days });
 }
 
 /**

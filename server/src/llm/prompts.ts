@@ -108,8 +108,9 @@ export async function generateDailySummary(
   ];
 
   // Prefer structured JSON output. Some OpenAI-compatible endpoints (Ollama,
-  // certain Volc/Together deployments) reject the response_format field with a
-  // 4xx. On that, retry once without it and parse the model's free-form output.
+  // certain Volc/Together deployments) reject the response_format field itself.
+  // Only in that specific case retry once without it and parse free-form output;
+  // every other error propagates so the caller can log and record it.
   let response: string;
   try {
     response = await getLLM().chat(messages, {
@@ -117,12 +118,8 @@ export async function generateDailySummary(
       response_format: { type: 'json_object' },
     });
   } catch (e) {
-    const msg = String(e);
-    if (/\b4\d{2}\b/.test(msg) || /response_format/i.test(msg)) {
-      response = await getLLM().chat(messages, { temperature: 0.2 });
-    } else {
-      throw e;
-    }
+    if (!isResponseFormatRejection(e)) throw e;
+    response = await getLLM().chat(messages, { temperature: 0.2 });
   }
 
   let parsed: any;
@@ -144,15 +141,25 @@ export async function generateDailySummary(
  * Chat expecting a JSON response. Some OpenAI-compatible endpoints reject
  * response_format with a 4xx; on that, retry once without it.
  */
+/**
+ * True only when the provider rejected the request *because of* the
+ * response_format field. Deliberately narrow: a blanket "any 4xx" check made
+ * the client retry credential/subscription/model errors (400 InvalidSubscription,
+ * 401, 404) without response_format too, doubling pointless calls per failure.
+ */
+const FORMAT_REJECTION_RE =
+  /response_format|json_object|json_schema|unsupported (parameter|field|value|argument)|unknown parameter|invalid_parameter/i;
+
+function isResponseFormatRejection(e: unknown): boolean {
+  return FORMAT_REJECTION_RE.test(e instanceof Error ? e.message : String(e));
+}
+
 async function chatJson(messages: { role: 'system' | 'user'; content: string }[], temperature: number): Promise<string> {
   try {
     return await getLLM().chat(messages, { temperature, response_format: { type: 'json_object' } });
   } catch (e) {
-    const msg = String(e);
-    if (/\b4\d{2}\b/.test(msg) || /response_format/i.test(msg)) {
-      return await getLLM().chat(messages, { temperature });
-    }
-    throw e;
+    if (!isResponseFormatRejection(e)) throw e;
+    return await getLLM().chat(messages, { temperature });
   }
 }
 

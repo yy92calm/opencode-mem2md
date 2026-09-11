@@ -54,11 +54,35 @@ export function countRawByDate(user_id: string, date: string): number {
   return row.c;
 }
 
-export function pruneRawOlderThan(days: number): number {
-  const result = getDb()
-    .prepare(`DELETE FROM raw_conversations WHERE date(timestamp) < date('now', '-' || ? || ' days')`)
+/**
+ * Drop raw conversations older than `days`, but only for calendar days that
+ * already have a daily summary. Unsummarized days are retained so a stalled
+ * LLM pipeline can never cause permanent loss of the source material.
+ *
+ * Dates are bucketed with localtime() to match listRawByDate/countRawByDate,
+ * so the retention window and the summary window agree on what a "day" is.
+ */
+export function pruneSummarizedRawOlderThan(days: number): { deleted: number; retained_days: number } {
+  const db = getDb();
+  const result = db
+    .prepare(`
+      DELETE FROM raw_conversations
+      WHERE date(datetime(timestamp, 'localtime')) < date('now', 'localtime', '-' || ? || ' days')
+        AND EXISTS (
+          SELECT 1 FROM daily_summaries s
+          WHERE s.user_id = raw_conversations.user_id
+            AND s.date = date(datetime(raw_conversations.timestamp, 'localtime'))
+        )
+    `)
     .run(days);
-  return Number(result.changes);
+  const retained = db
+    .prepare(`
+      SELECT COUNT(DISTINCT date(datetime(timestamp, 'localtime'))) AS d
+      FROM raw_conversations
+      WHERE date(datetime(timestamp, 'localtime')) < date('now', 'localtime', '-' || ? || ' days')
+    `)
+    .get(days) as { d: number };
+  return { deleted: Number(result.changes), retained_days: retained.d };
 }
 
 // ===== Hard memories =====
@@ -488,5 +512,72 @@ export function getStats(user_id: string): UserStats {
       WHERE user_id = ? AND status = 'active' AND usage_count > 0
       ORDER BY usage_count DESC LIMIT 5
     `).all(user_id) as UserStats['most_used_memories'],
+  };
+}
+
+// ===== Service state (pipeline observability) =====
+
+export function getServiceState(key: string): string | null {
+  const row = getDb()
+    .prepare(`SELECT value FROM service_state WHERE key = ?`)
+    .get(key) as { value: string } | undefined;
+  return row?.value ?? null;
+}
+
+export function setServiceState(key: string, value: string): void {
+  getDb()
+    .prepare(`
+      INSERT INTO service_state (key, value, updated_at) VALUES (?, ?, ?)
+      ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+    `)
+    .run(key, value.slice(0, 2000), new Date().toISOString());
+}
+
+export function getServiceSnapshot(): Record<string, { value: string; updated_at: string }> {
+  const rows = getDb()
+    .prepare(`SELECT key, value, updated_at FROM service_state`)
+    .all() as { key: string; value: string; updated_at: string }[];
+  const out: Record<string, { value: string; updated_at: string }> = {};
+  for (const r of rows) out[r.key] = { value: r.value, updated_at: r.updated_at };
+  return out;
+}
+
+export interface HealthMetrics {
+  last_summary_date: string | null;
+  last_summary_at: string | null;
+  last_profile_at: string | null;
+  unsummarized_days: number;
+}
+
+/**
+ * Pipeline progress markers for /health. A stalled LLM shows up here as a
+ * growing unsummarized_days and an aging last_summary_date even while the HTTP
+ * layer keeps returning 200.
+ */
+export function getHealthMetrics(): HealthMetrics {
+  const db = getDb();
+  const s = db
+    .prepare(`SELECT date, generated_at FROM daily_summaries ORDER BY date DESC, generated_at DESC LIMIT 1`)
+    .get() as { date: string; generated_at: string } | undefined;
+  const p = db
+    .prepare(`SELECT generated_at FROM user_profiles ORDER BY generated_at DESC LIMIT 1`)
+    .get() as { generated_at: string } | undefined;
+  const u = db
+    .prepare(`
+      SELECT COUNT(*) AS c FROM (
+        SELECT DISTINCT r.user_id, date(datetime(r.timestamp, 'localtime')) AS d
+        FROM raw_conversations r
+        WHERE NOT EXISTS (
+          SELECT 1 FROM daily_summaries s
+          WHERE s.user_id = r.user_id AND s.date = date(datetime(r.timestamp, 'localtime'))
+        )
+      )
+    `)
+    .get() as { c: number };
+  return {
+    last_summary_date: s?.date ?? null,
+    last_summary_at: s?.generated_at ?? null,
+    last_profile_at: p?.generated_at ?? null,
+    unsummarized_days: u.c,
   };
 }

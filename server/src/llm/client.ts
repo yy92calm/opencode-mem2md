@@ -47,6 +47,8 @@ export class LLMClient {
   async chat(messages: ChatMessage[], opts: ChatOptions = {}): Promise<string> {
     const url = `${this.cfg.base_url.replace(/\/$/, '')}/chat/completions`;
     const body = {
+      // Provider extras first, so the fields this client owns always win.
+      ...(this.cfg.extra_body ?? {}),
       model: this.cfg.model,
       messages,
       temperature: opts.temperature ?? 0.3,

@@ -22,6 +22,14 @@ llm:
   model: gpt-4o-mini                # cheap model is fine for summary/profile
   timeout_ms: 60000
   max_retries: 3
+  # Provider-specific fields merged into every request body (cannot override
+  # model/messages/stream). Reasoning models waste latency and output tokens on
+  # summarization/distillation, so turn thinking off where supported:
+  #   Qwen (DashScope / token-plan compatible-mode) → enable_thinking: false
+  # Measured on qwen3.8-flash: ~5x fewer completion tokens, ~30% lower latency,
+  # and large-context distill calls stop hitting timeout_ms.
+  # extra_body:
+  #   enable_thinking: false
 
 # Pre-provision user → api_key bindings.
 # Plugin sends Authorization: Bearer <api_key>, worker resolves to user_id.

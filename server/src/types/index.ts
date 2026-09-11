@@ -70,6 +70,13 @@ export interface LLMConfig {
   model: string;
   timeout_ms: number;
   max_retries: number;
+  /**
+   * Provider-specific fields merged into every request body. Reasoning models
+   * waste latency and output tokens on summarization/distillation; e.g. Qwen
+   * accepts `{ enable_thinking: false }`, which measured ~5x fewer completion
+   * tokens and ~30% lower latency on this workload.
+   */
+  extra_body?: Record<string, unknown>;
 }
 
 export interface UserBinding {

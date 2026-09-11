@@ -26,6 +26,25 @@ function deepExpand(obj: any): any {
   return obj;
 }
 
+/**
+ * Validate llm.extra_body: an optional mapping of provider-specific request
+ * fields. Fields the client owns are rejected so a typo in config cannot
+ * silently break the request shape.
+ */
+function parseExtraBody(v: unknown): Record<string, unknown> {
+  if (v === undefined || v === null) return {};
+  if (typeof v !== 'object' || Array.isArray(v)) {
+    throw new Error('Config: llm.extra_body must be a mapping of field name to value');
+  }
+  const RESERVED = ['model', 'messages', 'stream'];
+  const out: Record<string, unknown> = {};
+  for (const [k, val] of Object.entries(v as Record<string, unknown>)) {
+    if (RESERVED.includes(k)) throw new Error(`Config: llm.extra_body may not override "${k}"`);
+    out[k] = val;
+  }
+  return out;
+}
+
 export function loadConfig(path: string = DEFAULT_CONFIG_PATH): ServerConfig {
   if (!existsSync(path)) {
     throw new Error(`Config file not found: ${path}. Copy config.example.yaml to config.yaml first.`);
@@ -95,6 +114,7 @@ export function loadConfig(path: string = DEFAULT_CONFIG_PATH): ServerConfig {
       model: expanded.llm.model,
       timeout_ms: expanded.llm.timeout_ms ?? 60000,
       max_retries: expanded.llm.max_retries ?? 3,
+      extra_body: parseExtraBody(expanded.llm.extra_body),
     },
     users: expanded.users,
     cron: {

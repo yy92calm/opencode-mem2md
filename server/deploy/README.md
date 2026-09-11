@@ -64,7 +64,11 @@ node scripts/backfill.mjs --from 2026-06-22 --to 2026-09-11          # 实际执
 
 ## 日志轮转
 
-`logrotate` 每天切割，保留 14 份，`copytruncate` 模式（不需要进程配合重开文件句柄）。手动验证：
+`logrotate` 每天切割，保留 14 份，`copytruncate` 模式（不需要进程配合重开文件句柄）。
+
+配置里的 `su ubuntu ubuntu` 是必需的：`logs/` 属主是 ubuntu，logrotate 以 root 运行时会因 "parent directory has insecure permissions" 直接拒绝轮转。
+
+手动验证：
 
 ```bash
 sudo logrotate -d /etc/logrotate.d/opencode-mem-worker   # dry-run

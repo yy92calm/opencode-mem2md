@@ -1,11 +1,11 @@
 ---
-name: mem-search
+name: mem_search
 description: Search the user's hard memories on the Worker via full-text query
 ---
 
-# mem-search Skill
+# mem_search Skill
 
-Wraps the `mem-search` plugin tool. Calls `GET /api/memory/search` on the Worker.
+Wraps the `mem_search` plugin tool. Calls `GET /api/memory/search` on the Worker.
 
 ## When to use
 
@@ -17,7 +17,7 @@ Wraps the `mem-search` plugin tool. Calls `GET /api/memory/search` on the Worker
 ## How to call
 
 ```yaml
-tool: mem-search
+tool: mem_search
 args:
   query: free-form text (matched via SQLite FTS5)
   limit: number of results (default 50)
@@ -26,4 +26,4 @@ args:
 ## Notes
 
 - Only searches `hard_memories` (user-asserted), not raw conversations.
-- For broader context, use `mem-profile` to see the synthesized user profile.
+- For broader context, use `mem_profile` to see the synthesized user profile.

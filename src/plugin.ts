@@ -1,209 +1,110 @@
-import { type Plugin, type PluginInput, tool } from '@opencode-ai/plugin';
-import { z } from 'zod';
-import { readFileSync, existsSync, writeFileSync, mkdirSync } from 'fs';
+/**
+ * opencode-mem plugin — OpenCode V2 plugin API (verified against 2.0.32).
+ *
+ * V1 → V2 mapping used here:
+ *   `tool.execute.after`                 → ctx.tool.hook("execute.after")
+ *   user prompt capture (message.updated)→ ctx.session.hook("prompt")
+ *   `experimental.chat.system.transform` → ctx.session.hook("context"), push SystemPart
+ *   `tool` map (zod + tool())            → ctx.tool.transform(editor.add(...)), JSON Schema
+ *   `event` session.idle                 → ctx.event.subscribe()
+ *   `dispose`                            → cleanup function returned by setup()
+ */
+import { Plugin } from '@opencode/plugin';
+import { existsSync, mkdirSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { homedir } from 'os';
 import { WorkerClient } from './sdk/remote.js';
-import { setLoggerClient, logger } from './utils/logger.js';
-import { isTrivial, safeStringify } from './utils/observer.js';
-import type { MemPluginConfig, HardMemory } from './types/index.js';
+import { fillDefaults, loadConfig } from './config.js';
+import { logger } from './utils/logger.js';
+import { isTrivial, safeStringify, toolContentToString } from './utils/observer.js';
+import type { HardMemory } from './types/index.js';
 
 const SERVICE = 'opencode-mem';
-const MEM_DIR = join(homedir(), '.config', 'opencode', 'mem');
-const DEFAULT_OFFLINE_CACHE = join(MEM_DIR, 'offline.jsonl');
-const DEFAULT_PROFILE_CACHE = join(MEM_DIR, 'profile.cache.md');
 
-function loadConfig(directory: string): MemPluginConfig | null {
-  const candidates = [
-    join(directory, '.opencode', 'mem', 'config.json'),
-    join(directory, 'mem-config.json'),
-    join(homedir(), '.config', 'opencode', 'mem', 'config.json'),
-  ];
+export default Plugin.define({
+  id: 'opencode-mem',
 
-  for (const path of candidates) {
-    if (!existsSync(path)) continue;
-    try {
-      const cfg = JSON.parse(readFileSync(path, 'utf-8')) as MemPluginConfig;
-      if (cfg.server_url && cfg.api_key) return cfg;
-    } catch {
-      continue;
+  async setup(ctx) {
+    const rawCfg = loadConfig(ctx.location.directory);
+    if (!rawCfg) {
+      logger.warn(
+        SERVICE,
+        'No memory config found. Skipping. Set MEM_SERVER_URL + MEM_API_KEY env, or create .opencode/mem/config.json',
+      );
+      return;
     }
-  }
 
-  // Env fallback
-  const env_url = process.env.MEM_SERVER_URL;
-  const env_key = process.env.MEM_API_KEY;
-  if (env_url && env_key) {
-    return { server_url: env_url, api_key: env_key };
-  }
-  return null;
-}
-
-function fillDefaults(cfg: MemPluginConfig): Required<MemPluginConfig> {
-  return {
-    server_url: cfg.server_url.replace(/\/$/, ''),
-    api_key: cfg.api_key,
-    raw_buffer_size: cfg.raw_buffer_size ?? 20,
-    raw_flush_interval_ms: cfg.raw_flush_interval_ms ?? 10000,
-    watchdog_interval_ms: cfg.watchdog_interval_ms ?? 5 * 60 * 1000,
-    write_timeout_ms: cfg.write_timeout_ms ?? 15000,
-    read_timeout_ms: cfg.read_timeout_ms ?? 10000,
-    profile_fetch_timeout_ms: cfg.profile_fetch_timeout_ms ?? 2000,
-    offline_cache_path: cfg.offline_cache_path ?? DEFAULT_OFFLINE_CACHE,
-    offline_cache_max_bytes: cfg.offline_cache_max_bytes ?? 10 * 1024 * 1024,
-    profile_cache_path: cfg.profile_cache_path ?? DEFAULT_PROFILE_CACHE,
-    profile_cache_ttl_ms: cfg.profile_cache_ttl_ms ?? 60_000,
-    memories_cache_ttl_ms: cfg.memories_cache_ttl_ms ?? 30_000,
-    inject_char_budget: cfg.inject_char_budget ?? 6000,
-  };
-}
-
-export const MemPlugin: Plugin = async ({ client, directory }: PluginInput) => {
-  setLoggerClient(client);
-
-  const rawCfg = loadConfig(directory);
-  if (!rawCfg) {
-    logger.warn(SERVICE, 'No memory config found. Skipping. Set MEM_SERVER_URL + MEM_API_KEY env, or create .opencode/mem/config.json');
-    // Return a no-op plugin so OpenCode doesn't crash
-    return {};
-  }
-
-  const cfg = fillDefaults(rawCfg);
-  const worker = new WorkerClient(cfg, (level, msg, extra) => {
-    switch (level) {
-      case 'debug': logger.debug(SERVICE, msg, extra); break;
-      case 'info': logger.info(SERVICE, msg, extra); break;
-      case 'warn': logger.warn(SERVICE, msg, extra); break;
-      case 'error': logger.error(SERVICE, msg, extra); break;
-      case 'fatal': logger.fatal(SERVICE, msg, extra); break;
-      default: logger.info(SERVICE, msg, extra);
-    }
-  });
-
-  const healthy = await worker.checkHealth(true);
-  logger.info(SERVICE, `MemPlugin initialized`, {
-    server: cfg.server_url,
-    healthy,
-    offline_cache: cfg.offline_cache_path,
-  });
-
-  return {
-    /**
-     * Capture every tool execution as a raw conversation entry.
-     * No client-side AI, no titles, no narratives — Worker handles all that.
-     */
-    'tool.execute.after': async (input, output) => {
-      const toolName = input.tool;
-      const toolInput = input.args;
-      const toolResult = output.output;
-      const sid = input.sessionID || 'unknown';
-
-      if (isTrivial(toolName, toolInput, toolResult)) return;
-
-      worker.enqueueRaw({
-        session_id: sid,
-        role: 'tool',
-        content: '',
-        tool_name: toolName,
-        tool_input: safeStringify(toolInput),
-        tool_output: safeStringify(toolResult, 6000),
-        timestamp: new Date().toISOString(),
-      });
-    },
-
-    event: async ({ event }) => {
-      // Capture user prompts as raw conversations
-      if (event.type === 'message.updated') {
-        const msg = (event as any).properties?.info;
-        if (msg?.role === 'user') {
-          const sid = msg.sessionID || 'unknown';
-          const text = safeStringify((msg as any).content ?? (msg as any).parts ?? '', 4000);
-          if (text) {
-            worker.enqueueRaw({
-              session_id: sid,
-              role: 'user',
-              content: text,
-              timestamp: new Date().toISOString(),
-            });
-          }
-        }
+    const cfg = fillDefaults(rawCfg);
+    const worker = new WorkerClient(cfg, (level, msg, extra) => {
+      switch (level) {
+        case 'debug':
+          logger.debug(SERVICE, msg, extra);
+          break;
+        case 'info':
+          logger.info(SERVICE, msg, extra);
+          break;
+        case 'warn':
+          logger.warn(SERVICE, msg, extra);
+          break;
+        case 'error':
+          logger.error(SERVICE, msg, extra);
+          break;
+        case 'fatal':
+          logger.fatal(SERVICE, msg, extra);
+          break;
+        default:
+          logger.info(SERVICE, msg, extra);
       }
+    });
 
-      // Flush + replay on session idle
-      if (event.type === 'session.idle') {
-        await worker.flushRaw();
-        worker.replayOfflineCache().catch(() => {});
-      }
-    },
+    const healthy = await worker.checkHealth(true);
+    logger.info(SERVICE, 'MemPlugin initialized', {
+      server: cfg.server_url,
+      healthy,
+      offline_cache: cfg.offline_cache_path,
+    });
 
-    /**
-     * Inject the user profile into the system prompt at the start of each turn.
-     * Profile is maintained server-side; we just fetch the latest.
-     * Note: hook return type is void — we mutate the output array in place.
-     *
-     * Memories are budgeted, not bulk-injected: ranked by source (manual first)
-     * then priority then recency, and cut when the char budget is exhausted.
-     * The rest stays reachable on-demand via mem-search.
-     */
-    'experimental.chat.system.transform': async (_input, output) => {
-      const [profile, memories] = await Promise.all([
-        worker.getProfile(),
-        worker.listMemories(50),
-      ]);
-
-      const parts: string[] = [];
-      if (profile) {
-        parts.push(`\n\n## User Profile (auto-maintained)\n\n${profile}`);
-      }
-      if (memories.length > 0) {
-        const sourceRank: Record<string, number> = { manual: 0, 'auto-promoted': 1, auto: 2 };
-        const priorityRank: Record<string, number> = { high: 0, medium: 1, low: 2 };
-        const ranked = [...memories].sort((a, b) =>
-          (sourceRank[a.source ?? 'manual'] ?? 0) - (sourceRank[b.source ?? 'manual'] ?? 0) ||
-          (priorityRank[a.priority ?? 'high'] ?? 0) - (priorityRank[b.priority ?? 'high'] ?? 0) ||
-          (b.timestamp || '').localeCompare(a.timestamp || ''),
-        );
-
-        const budget = cfg.inject_char_budget;
-        const lines: string[] = [];
-        let used = 0;
-        let omitted = 0;
-        for (const m of ranked) {
-          const line = `- [${m.type}] ${m.title}: ${m.content.slice(0, 300)}`;
-          if (used + line.length > budget) {
-            omitted++;
-            continue;
-          }
-          lines.push(line);
-          used += line.length;
-        }
-        if (lines.length > 0) {
-          const hint = omitted > 0 ? `\n(${omitted} more memories omitted — use mem-search to recall them)` : '';
-          parts.push(`\n\n## Hard Memories (user-asserted + auto-distilled)\n\n${lines.join('\n')}${hint}`);
-        }
-      }
-      if (parts.length > 0 && Array.isArray((output as any).system)) {
-        (output as any).system.push(parts.join('\n'));
-      }
-    },
-
-    tool: {
-      /**
-       * Explicit "remember X" — called by mem-remember Skill.
-       */
-      'mem-capture': tool({
+    // --- Memory tools (V2: synchronous transform + JSON Schema + {content} result) ---
+    await ctx.tool.transform((editor) => {
+      // "remember X" — called by the mem-remember skill.
+      editor.add({
+        name: 'mem_capture',
         description: 'Persist a hard memory (user explicitly asked to remember something)',
-        args: {
-          type: z.enum(['preference', 'config', 'decision', 'error', 'discovery', 'fact', 'constraint', 'pattern'])
-            .describe('Memory type'),
-          title: z.string().describe('Short title summarizing the memory'),
-          content: z.string().describe('Full description'),
-          facts: z.array(z.string()).default([]).describe('Key facts (2-5 bullet points)'),
-          concepts: z.array(z.string()).default([]).describe('Related concept tags'),
-          priority: z.enum(['high', 'medium', 'low']).default('high'),
+        input: {
+          type: 'object',
+          properties: {
+            type: {
+              type: 'string',
+              enum: ['preference', 'config', 'decision', 'error', 'discovery', 'fact', 'constraint', 'pattern'],
+              description: 'Memory type',
+            },
+            title: { type: 'string', description: 'Short title summarizing the memory' },
+            content: { type: 'string', description: 'Full description' },
+            facts: {
+              type: 'array',
+              items: { type: 'string' },
+              description: 'Key facts (2-5 bullet points)',
+            },
+            concepts: {
+              type: 'array',
+              items: { type: 'string' },
+              description: 'Related concept tags',
+            },
+            priority: { type: 'string', enum: ['high', 'medium', 'low'], description: 'Defaults to high' },
+          },
+          required: ['type', 'title', 'content'],
+          additionalProperties: false,
         },
-        execute: async (args, context) => {
-          const m: HardMemory = {
+        execute: async (input, context) => {
+          const args = input as {
+            type: HardMemory['type'];
+            title: string;
+            content: string;
+            facts?: string[];
+            concepts?: string[];
+            priority?: 'high' | 'medium' | 'low';
+          };
+          const memory: HardMemory = {
             type: args.type,
             title: args.title,
             content: args.content,
@@ -214,93 +115,136 @@ export const MemPlugin: Plugin = async ({ client, directory }: PluginInput) => {
             session_id: context.sessionID,
             timestamp: new Date().toISOString(),
           };
-          const result = await worker.sendHardMemory(m);
-          return result
-            ? `✓ Remembered: ${args.title} (id=${result.id})`
-            : `⚠ Cached offline (worker unreachable): ${args.title}`;
+          const result = await worker.sendHardMemory(memory);
+          return {
+            content: result
+              ? `✓ Remembered: ${args.title} (id=${result.id})`
+              : `⚠ Cached offline (worker unreachable): ${args.title}`,
+          };
         },
-      }),
+      });
 
-      'mem-search': tool({
+      editor.add({
+        name: 'mem_search',
         description: 'Search hard memories by keyword (full-text)',
-        args: {
-          query: z.string().describe('Search query'),
-          limit: z.number().optional().default(50),
+        input: {
+          type: 'object',
+          properties: {
+            query: { type: 'string', description: 'Search query' },
+            limit: { type: 'number', description: 'Max results (default 50)' },
+          },
+          required: ['query'],
+          additionalProperties: false,
         },
-        execute: async (args) => {
-          const items = await worker.searchMemories(args.query, args.limit);
-          if (items.length === 0) return `No memories matched "${args.query}".`;
-          return items.map(m => `- [${m.type}] ${m.title}\n  ${m.content.slice(0, 200)}`).join('\n');
+        execute: async (input) => {
+          const args = input as { query: string; limit?: number };
+          const items = await worker.searchMemories(args.query, args.limit ?? 50);
+          return {
+            content:
+              items.length === 0
+                ? `No memories matched "${args.query}".`
+                : items
+                    .map((memory) => `- [${memory.type}] ${memory.title}\n  ${memory.content.slice(0, 200)}`)
+                    .join('\n'),
+          };
         },
-      }),
+      });
 
-      'mem-list': tool({
+      editor.add({
+        name: 'mem_list',
         description: 'List recent hard memories',
-        args: {
-          limit: z.number().optional().default(50),
+        input: {
+          type: 'object',
+          properties: {
+            limit: { type: 'number', description: 'Max results (default 50)' },
+          },
+          additionalProperties: false,
         },
-        execute: async (args) => {
-          const items = await worker.listMemories(args.limit);
-          if (items.length === 0) return 'No memories yet.';
-          return items.map(m => `- [${m.type}] ${m.title}`).join('\n');
+        execute: async (input) => {
+          const args = input as { limit?: number };
+          const items = await worker.listMemories(args.limit ?? 50);
+          return {
+            content: items.length === 0 ? 'No memories yet.' : items.map((memory) => `- [${memory.type}] ${memory.title}`).join('\n'),
+          };
         },
-      }),
+      });
 
-      'mem-profile': tool({
+      editor.add({
+        name: 'mem_profile',
         description: 'Fetch the latest auto-generated user profile from the Worker',
-        args: {},
+        input: { type: 'object', properties: {}, additionalProperties: false },
         execute: async () => {
           const profile = await worker.getProfile();
-          return profile ?? 'No profile yet. Worker will generate one after enough activity.';
+          return {
+            content: profile ?? 'No profile yet. Worker will generate one after enough activity.',
+          };
         },
-      }),
+      });
 
-      'mem-health': tool({
+      editor.add({
+        name: 'mem_health',
         description: 'Check Worker connectivity and replay offline cache if available',
-        args: {},
+        input: { type: 'object', properties: {}, additionalProperties: false },
         execute: async () => {
-          const healthy = await worker.checkHealth(true);
-          const replayed = healthy ? await worker.replayOfflineCache() : 0;
-          return JSON.stringify({
-            server_url: cfg.server_url,
-            healthy,
-            offline_cache_replayed: replayed,
-          }, null, 2);
+          const isHealthy = await worker.checkHealth(true);
+          const replayed = isHealthy ? await worker.replayOfflineCache() : 0;
+          return {
+            content: JSON.stringify(
+              { server_url: cfg.server_url, healthy: isHealthy, offline_cache_replayed: replayed },
+              null,
+              2,
+            ),
+          };
         },
-      }),
+      });
 
-      /**
-       * Sync approved skill drafts from the Worker into ~/.config/opencode/skills/.
-       * Drafts are auto-distilled weekly; nothing lands on disk without the
-       * user approving them server-side first.
-       */
-      'mem-skill-sync': tool({
+      // Sync approved skill drafts from the Worker into ~/.config/opencode/skills/.
+      // Drafts are auto-distilled weekly; nothing lands on disk without the
+      // user approving them server-side first.
+      editor.add({
+        name: 'mem_skill_sync',
         description: 'List Worker skill drafts, optionally approve them and install approved ones into ~/.config/opencode/skills/',
-        args: {
-          approve: z.array(z.number()).optional().default([])
-            .describe('Draft ids to approve before syncing'),
-          install: z.boolean().optional().default(true)
-            .describe('Write approved drafts to ~/.config/opencode/skills/'),
+        input: {
+          type: 'object',
+          properties: {
+            approve: {
+              type: 'array',
+              items: { type: 'number' },
+              description: 'Draft ids to approve before syncing',
+            },
+            install: { type: 'boolean', description: 'Write approved drafts to ~/.config/opencode/skills/ (default true)' },
+          },
+          additionalProperties: false,
         },
-        execute: async (args) => {
-          // Approve requested drafts first (one-by-one; failures don't block the rest)
+        execute: async (input) => {
+          const args = input as { approve?: number[]; install?: boolean };
           for (const id of args.approve ?? []) {
-            await worker.approveSkillDraft(id);
+            const approved = await worker.approveSkillDraft(id);
+            if (!approved) throw new Error(`Could not approve skill draft ${id}`);
           }
 
           const drafts = await worker.listSkillDrafts('approved');
-          if (!args.install) {
-            return drafts.length === 0
-              ? 'No approved skill drafts.'
-              : drafts.map(d => `- #${d.id} ${d.title}`).join('\n');
+          const install = args.install ?? true;
+          if (!install) {
+            return {
+              content:
+                drafts.length === 0
+                  ? 'No approved skill drafts.'
+                  : drafts.map((draft) => `- #${draft.id} ${draft.title}`).join('\n'),
+            };
           }
-          if (drafts.length === 0) return 'No approved skill drafts to install.';
+          if (drafts.length === 0) return { content: 'No approved skill drafts to install.' };
 
           const skillsDir = join(homedir(), '.config', 'opencode', 'skills');
           const installed: string[] = [];
           const skipped: string[] = [];
-          for (const d of drafts) {
-            const slug = d.title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 60) || `skill-${d.id}`;
+          for (const draft of drafts) {
+            const slug =
+              draft.title
+                .toLowerCase()
+                .replace(/[^a-z0-9]+/g, '-')
+                .replace(/^-+|-+$/g, '')
+                .slice(0, 60) || `skill-${draft.id}`;
             const dir = join(skillsDir, slug);
             const file = join(dir, 'SKILL.md');
             // Never clobber an existing skill — human edits win over drafts.
@@ -310,18 +254,120 @@ export const MemPlugin: Plugin = async ({ client, directory }: PluginInput) => {
             }
             try {
               mkdirSync(dir, { recursive: true });
-              writeFileSync(file, d.content_md, 'utf-8');
+              writeFileSync(file, draft.content_md, 'utf-8');
               installed.push(slug);
-            } catch (e) {
-              logger.warn(SERVICE, `skill write failed`, { slug, error: String(e) });
+            } catch (error) {
+              logger.warn(SERVICE, 'skill write failed', { slug, error: String(error) });
               skipped.push(slug);
             }
           }
-          return JSON.stringify({ installed, skipped_existing: skipped }, null, 2);
+          return { content: JSON.stringify({ installed, skipped_existing: skipped }, null, 2) };
         },
-      }),
-    },
-  };
-};
+      });
+    });
 
-export default MemPlugin;
+    // --- Capture tool executions as raw conversation entries ---
+    await ctx.tool.hook('execute.after', (event) => {
+      if (event.status !== 'completed') return;
+      const toolName = event.tool;
+      const toolResult = toolContentToString(event.result?.content);
+      if (isTrivial(toolName, event.input, toolResult)) return;
+      worker.enqueueRaw({
+        session_id: event.sessionID || 'unknown',
+        role: 'tool',
+        content: '',
+        tool_name: toolName,
+        tool_input: safeStringify(event.input),
+        tool_output: safeStringify(toolResult, 6000),
+        timestamp: new Date().toISOString(),
+      });
+    });
+
+    // --- Capture user prompts as raw conversations ---
+    // (V1 used the message.updated event; V2's prompt hook is the direct equivalent.)
+    await ctx.session.hook('prompt', (event) => {
+      const text = safeStringify(event.prompt.text, 4000);
+      if (!text) return;
+      worker.enqueueRaw({
+        session_id: event.sessionID,
+        role: 'user',
+        content: text,
+        timestamp: new Date().toISOString(),
+      });
+    });
+
+    // --- Inject profile + memories into the system prompt ---
+    // (V1: experimental.chat.system.transform; V2: session "context" hook.)
+    // Memories are budgeted, not bulk-injected: ranked by source (manual first)
+    // then priority then recency, cut when the char budget is exhausted.
+    // The rest stays reachable on-demand via mem_search.
+    await ctx.session.hook('context', async (event) => {
+      // Hot path: never let Worker unavailability break a model request.
+      let profile: string | null = null;
+      let memories: HardMemory[] = [];
+      try {
+        [profile, memories] = await Promise.all([worker.getProfile(), worker.listMemories(50)]);
+      } catch (error) {
+        logger.debug(SERVICE, 'context injection fetch failed, skipping', { error: String(error) });
+      }
+      const parts: string[] = [];
+      if (profile) {
+        parts.push(`\n\n## User Profile (auto-maintained)\n\n${profile}`);
+      }
+      if (memories.length > 0) {
+        const sourceRank = { manual: 0, 'auto-promoted': 1, auto: 2 } as Record<string, number>;
+        const priorityRank = { high: 0, medium: 1, low: 2 } as Record<string, number>;
+        const ranked = [...memories].sort(
+          (a, b) =>
+            (sourceRank[a.source ?? 'manual'] ?? 0) - (sourceRank[b.source ?? 'manual'] ?? 0) ||
+            (priorityRank[a.priority ?? 'high'] ?? 0) - (priorityRank[b.priority ?? 'high'] ?? 0) ||
+            (b.timestamp || '').localeCompare(a.timestamp || ''),
+        );
+
+        const lines: string[] = [];
+        let used = 0;
+        let omitted = 0;
+        for (const memory of ranked) {
+          const line = `- [${memory.type}] ${memory.title}: ${memory.content.slice(0, 300)}`;
+          if (used + line.length > cfg.inject_char_budget) {
+            omitted++;
+            continue;
+          }
+          lines.push(line);
+          used += line.length;
+        }
+        if (lines.length > 0) {
+          const hint = omitted > 0 ? `\n(${omitted} more memories omitted — use mem_search to recall them)` : '';
+          parts.push(`\n\n## Hard Memories (user-asserted + auto-distilled)\n\n${lines.join('\n')}${hint}`);
+        }
+      }
+      if (parts.length > 0) {
+        event.system.push({ type: 'text', text: parts.join('\n') });
+      }
+    });
+
+    // --- Flush + replay on session idle ---
+    const controller = new AbortController();
+    void (async () => {
+      try {
+        for await (const event of ctx.event.subscribe({ signal: controller.signal })) {
+          if (event.type === 'session.idle') {
+            try {
+              await worker.flushRaw();
+              await worker.replayOfflineCache();
+            } catch (error) {
+              logger.warn(SERVICE, 'idle flush failed', { error: String(error) });
+            }
+          }
+        }
+      } catch {
+        // stream aborted during unload — ignore
+      }
+    })();
+
+    return () => {
+      controller.abort();
+      worker.shutdown();
+    };
+  },
+});

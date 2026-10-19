@@ -1,37 +1,12 @@
 /**
- * Simple logging utility
- * 
- * Uses OpenCode SDK client.app.log() to send logs to the logging system
- * instead of console.log which would appear in user's chat.
- * Falls back to console for ALL levels if the SDK log call fails, so that
- * warn/error messages are never silently dropped.
+ * Simple logging utility.
+ *
+ * OpenCode V2 (2.0.x) removed the V1 `client.app.log()` plugin API, so plugin
+ * logs go to console. The OpenCode host captures plugin console output in its
+ * debug logs; warn/error also stay visible on stderr and are never swallowed.
  */
 
-let opencodeClient: any = null;
-
-export function setLoggerClient(client: any): void {
-  opencodeClient = client;
-}
-
-async function sendLog(level: 'debug' | 'info' | 'warn' | 'error' | 'fatal', service: string, message: string, context?: Record<string, unknown>) {
-  // Use OpenCode SDK log if available
-  if (opencodeClient?.app?.log) {
-    try {
-      await opencodeClient.app.log({
-        body: {
-          service,
-          level,
-          message,
-          ...context,
-        },
-      });
-      return;
-    } catch {
-      // Fall back to console if SDK log fails
-    }
-  }
-  
-  // Fallback to console for every level — never swallow warn/error.
+function sendLog(level: 'debug' | 'info' | 'warn' | 'error' | 'fatal', service: string, message: string, context?: Record<string, unknown>) {
   const line = `[${service}] ${level.toUpperCase()} ${message}`;
   if (level === 'error' || level === 'fatal') {
     console.error(line, context);

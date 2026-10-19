@@ -1,11 +1,11 @@
 ---
-name: mem-capture
+name: mem_capture
 description: Persist a hard memory to the centralized opencode-mem-worker
 ---
 
-# mem-capture Skill
+# mem_capture Skill
 
-Wraps the `mem-capture` plugin tool. Use this when you need to deliberately
+Wraps the `mem_capture` plugin tool. Use this when you need to deliberately
 store a fact, preference, decision, or rule that should survive across sessions.
 
 ## When to use
@@ -18,7 +18,7 @@ store a fact, preference, decision, or rule that should survive across sessions.
 ## How to call
 
 ```yaml
-tool: mem-capture
+tool: mem_capture
 args:
   type: preference | config | decision | error | discovery | fact
   title: short semantic title (not "Read: file.ts")
@@ -29,7 +29,7 @@ args:
 ```
 
 The Worker stores it in `hard_memories` (permanent, FTS5-searchable) and
-will incorporate it into the next user profile regeneration.
+incorporates it into the next user profile regeneration.
 
 ## Notes
 

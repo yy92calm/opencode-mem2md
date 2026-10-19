@@ -58,7 +58,10 @@ function install() {
   console.log('     or create ~/.config/opencode/mem/config.json (see config.example.json)');
   console.log('  2. Start the Worker (see server/README.md)');
   console.log('  3. Restart OpenCode');
-  console.log('  4. Tools available: mem-capture, mem-search, mem-list, mem-profile, mem-health');
+  console.log('  4. Tools available: mem_capture, mem_search, mem_list, mem_profile, mem_health, mem_skill_sync');
+  console.log('\nRequires OpenCode V2 (2.0.x). The plugin uses the V2 plugin API');
+  console.log('(Plugin.define + ctx.tool/session hooks). OpenCode V2 auto-loads');
+  console.log('files placed in ~/.config/opencode/plugins/ — no config change needed.');
 }
 
 install();

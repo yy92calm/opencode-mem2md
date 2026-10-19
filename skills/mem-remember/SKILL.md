@@ -16,7 +16,7 @@ trigger_words:
 # mem-remember Skill
 
 When the user says any of the trigger words, infer the memory type from
-context and call `mem-capture` directly. The user shouldn't have to specify
+context and call `mem_capture` directly. The user shouldn't have to specify
 the structured fields themselves.
 
 ## Workflow
@@ -33,7 +33,7 @@ the structured fields themselves.
 4. Extract a short semantic `title` (≤ 30 chars).
 5. Pull 2-5 concrete `facts` (verbatim phrases from the user).
 6. Tag 1-3 `concepts`.
-7. Call `mem-capture` with `priority: high` (user-asserted = important).
+7. Call `mem_capture` with `priority: high` (user-asserted = important).
 8. Briefly confirm to the user what was saved.
 
 ## Example
@@ -41,7 +41,7 @@ the structured fields themselves.
 User: "记住这个项目用 Bun 构建，不要用 npm"
 
 ```yaml
-tool: mem-capture
+tool: mem_capture
 args:
   type: preference
   title: 项目构建工具 Bun

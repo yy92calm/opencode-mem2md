@@ -1,7 +1,7 @@
 {
   "name": "opencode-mem-plugin",
   "version": "2.0.0",
-  "description": "OpenCode plugin that captures conversations and hard memories to a centralized opencode-mem-worker",
+  "description": "OpenCode V2 plugin with persistent memory backed by a centralized Worker",
   "type": "module",
   "main": "dist/opencode-mem.bundle.js",
   "scripts": {
@@ -10,6 +10,7 @@
     "build:all": "npm run build && npm run bundle",
     "dev": "tsc --watch",
     "typecheck": "tsc --noEmit",
+    "test:smoke": "node scripts/smoke-v2.mjs",
     "install:opencode": "node scripts/install-opencode.js"
   },
   "devDependencies": {
@@ -19,8 +20,6 @@
   },
   "license": "MIT",
   "dependencies": {
-    "@opencode-ai/plugin": "^1.14.48",
-    "@opencode-ai/sdk": "^1.14.48",
-    "zod": "4.1.8"
+    "@opencode/plugin": "^2.0.32"
   }
 }

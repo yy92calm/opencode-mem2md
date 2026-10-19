@@ -48,12 +48,17 @@ export class WorkerClient {
   private profileCache: { value: string; at: number } | null = null;
   private memoriesCache: { value: HardMemory[]; at: number } | null = null;
 
-  constructor(private cfg: Required<MemPluginConfig>, private log: LogFn) {
-    this.startFlushTimer();
-    this.startWatchdog();
-    this.installShutdownHooks();
-    // Replay offline cache opportunistically on init
-    this.replayOfflineCache().catch(e => this.log('warn', 'offline replay failed', { error: String(e) }));
+  constructor(
+    private cfg: Required<MemPluginConfig>,
+    private log: LogFn,
+    options: { background?: boolean } = {},
+  ) {
+    if (options.background !== false) {
+      this.startFlushTimer();
+      this.startWatchdog();
+      this.installShutdownHooks();
+      this.replayOfflineCache().catch(e => this.log('warn', 'offline replay failed', { error: String(e) }));
+    }
   }
 
   private startFlushTimer(): void {
@@ -192,14 +197,10 @@ export class WorkerClient {
   }
 
   async searchMemories(query: string, limit = 50): Promise<HardMemory[]> {
-    try {
-      const result = await this.get<{ items: HardMemory[] }>(
-        `/api/memory/search?q=${encodeURIComponent(query)}&limit=${limit}`,
-      );
-      return result?.items ?? [];
-    } catch {
-      return [];
-    }
+    const result = await this.get<{ items: HardMemory[] }>(
+      `/api/memory/search?q=${encodeURIComponent(query)}&limit=${limit}`,
+    );
+    return result?.items ?? [];
   }
 
   async listMemories(limit = 100): Promise<HardMemory[]> {
@@ -212,8 +213,12 @@ export class WorkerClient {
       const items = result?.items ?? [];
       this.memoriesCache = { value: items, at: Date.now() };
       return items;
-    } catch {
-      return this.memoriesCache?.value ?? [];
+    } catch (e) {
+      if (this.memoriesCache) {
+        this.log('warn', 'memory list request failed, using cached results', { error: String(e) });
+        return this.memoriesCache.value;
+      }
+      throw e;
     }
   }
 
@@ -232,12 +237,8 @@ export class WorkerClient {
 
   async listSkillDrafts(status?: 'draft' | 'approved'): Promise<SkillDraft[]> {
     const qs = status ? `?status=${status}` : '';
-    try {
-      const result = await this.get<{ items: SkillDraft[] }>(`/api/skills/drafts${qs}`);
-      return result?.items ?? [];
-    } catch {
-      return [];
-    }
+    const result = await this.get<{ items: SkillDraft[] }>(`/api/skills/drafts${qs}`);
+    return result?.items ?? [];
   }
 
   /** Explicit human approval — throws on 404/already-approved. */

@@ -35,3 +35,24 @@ export function safeStringify(value: unknown, maxLen = 4000): string {
     return String(value).slice(0, maxLen);
   }
 }
+
+/**
+ * OpenCode V2 tool results carry `content` as a string or a list of content
+ * parts ({type:'text'} | {type:'file'}). Flatten to a single string for the
+ * trivial filter and upload.
+ */
+export function toolContentToString(content: unknown): string {
+  if (content == null) return '';
+  if (typeof content === 'string') return content;
+  if (!Array.isArray(content)) return safeStringify(content);
+  return content
+    .map((part: any) => {
+      if (part == null) return '';
+      if (typeof part === 'string') return part;
+      if (part.type === 'text') return String(part.text ?? '');
+      if (part.type === 'file') return `[file: ${part.uri ?? ''}]`;
+      return safeStringify(part, 500);
+    })
+    .filter(Boolean)
+    .join('\n');
+}

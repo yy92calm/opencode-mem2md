@@ -149,10 +149,20 @@ export function insertHard(m: HardMemoryInsert): number {
   return Number(result.lastInsertRowid);
 }
 
-export function listHard(user_id: string, limit = 100, includeDeprecated = false): HardMemory[] {
+export function listHard(
+  user_id: string,
+  limit = 100,
+  includeDeprecated = false,
+  order: 'recent' | 'value' = 'recent',
+): HardMemory[] {
   const statusFilter = includeDeprecated ? '' : `AND status = 'active'`;
+  // 'value' ranks what is worth injecting: user-asserted first, then what has
+  // actually been recalled, then recency. 'recent' keeps list semantics.
+  const orderBy = order === 'value'
+    ? `ORDER BY (source = 'manual') DESC, usage_count DESC, priority = 'high' DESC, timestamp DESC`
+    : `ORDER BY timestamp DESC`;
   const rows = getDb()
-    .prepare(`SELECT * FROM hard_memories WHERE user_id = ? ${statusFilter} ORDER BY timestamp DESC LIMIT ?`)
+    .prepare(`SELECT * FROM hard_memories WHERE user_id = ? ${statusFilter} ${orderBy} LIMIT ?`)
     .all(user_id, limit) as any[];
   return rows.map(deserializeHard);
 }
@@ -573,17 +583,31 @@ export function getContextBundle(user_id: string, workspace: string | null, opts
   workspace_limit?: number;
   focus_days?: number;
   focus_limit?: number;
+  /** Count served memories as used (the plugin passes true; UI does not). */
+  touch?: boolean;
 }): ContextBundle {
   const hardLimit = Math.min(Math.max(opts?.hard_limit ?? 50, 1), 200);
   const wsLimit = Math.min(Math.max(opts?.workspace_limit ?? 30, 1), 200);
   const focusDays = Math.min(Math.max(opts?.focus_days ?? 7, 1), 90);
   const focusLimit = Math.min(Math.max(opts?.focus_limit ?? 8, 1), 50);
 
+  const workspaceMemories = workspace ? listWorkspaceMemories(user_id, workspace, wsLimit) : [];
+  const hardMemories = listHard(user_id, hardLimit, false, 'value');
+
+  // Injection counts as use: without this, usage_count stays 0 for memories
+  // that are seen every turn, and governance would evict them as "unused".
+  if (opts?.touch) {
+    const hardIds = hardMemories.map(m => m.id).filter((id): id is number => typeof id === 'number');
+    const wsIds = workspaceMemories.map(m => m.id).filter((id): id is number => typeof id === 'number');
+    if (hardIds.length > 0) touchHardUsage(hardIds);
+    if (wsIds.length > 0) touchWorkspaceUsage(wsIds);
+  }
+
   return {
     workspace,
     profile: getProfile(user_id)?.content ?? null,
-    workspace_memories: workspace ? listWorkspaceMemories(user_id, workspace, wsLimit) : [],
-    hard_memories: listHard(user_id, hardLimit),
+    workspace_memories: workspaceMemories,
+    hard_memories: hardMemories,
     focus: listFocus(user_id, workspace, focusDays, focusLimit),
   };
 }

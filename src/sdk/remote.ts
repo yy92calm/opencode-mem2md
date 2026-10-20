@@ -174,6 +174,8 @@ export class WorkerClient {
       const qs = new URLSearchParams();
       if (workspace) qs.set('workspace', workspace);
       qs.set('days', String(days));
+      // Injection counts as recall (see getContextBundle on the Worker).
+      qs.set('touch', '1');
       const bundle = await this.get<ContextBundle>(`/api/workspace/context?${qs.toString()}`, this.cfg.profile_fetch_timeout_ms);
       if (bundle) {
         this.contextCache = { value: bundle, at: Date.now(), workspace };

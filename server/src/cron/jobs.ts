@@ -51,7 +51,7 @@ const dailyInFlight = new Set<string>();
 // recalled and ages out is deprecated (not deleted), keeping the active set
 // small enough to stay useful in the per-turn injection budget.
 const HARD_MEMORY_CAP = 150;
-const STALE_AUTO_DAYS = 60;
+const STALE_AUTO_DAYS = 30;
 /** Minimum body length for an auto-distilled atom; shorter ones are noise. */
 const MIN_ATOM_CONTENT = 80;
 

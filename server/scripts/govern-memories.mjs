@@ -6,7 +6,7 @@
  *
  * Steps per user:
  *   1. report the active store
- *   2. retire auto-distilled memories never recalled and older than 60 days
+ *   2. retire auto-distilled memories never recalled and older than 30 days
  *   3. enforce the 150-entry active cap (lowest value first)
  *   4. regenerate the profile from the latest summaries (needs LLM)
  *
@@ -23,7 +23,7 @@ const args = process.argv.slice(2);
 const dryRun = args.includes('--dry-run');
 const userArg = args.includes('--user') ? args[args.indexOf('--user') + 1] : null;
 
-const STALE_DAYS = 60;
+const STALE_DAYS = 30;
 const CAP = 150;
 
 const cfg = loadConfig();

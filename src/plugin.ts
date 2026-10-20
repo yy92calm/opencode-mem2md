@@ -46,6 +46,7 @@ interface MemoryLike {
   priority?: string;
   timestamp?: string;
   workspace?: string;
+  usage_count?: number;
 }
 
 /**
@@ -55,9 +56,12 @@ interface MemoryLike {
 function rankMemories<T extends MemoryLike>(memories: T[]): T[] {
   const sourceRank: Record<string, number> = { manual: 0, 'auto-promoted': 1, auto: 2 };
   const priorityRank: Record<string, number> = { high: 0, medium: 1, low: 2 };
+  // Recall count dominates: memories that actually get used should outrank
+  // equally-worded entries that were never touched.
   return [...memories].sort(
     (a, b) =>
       (sourceRank[a.source ?? 'manual'] ?? 0) - (sourceRank[b.source ?? 'manual'] ?? 0) ||
+      (b.usage_count ?? 0) - (a.usage_count ?? 0) ||
       (priorityRank[a.priority ?? 'high'] ?? 0) - (priorityRank[b.priority ?? 'high'] ?? 0) ||
       (b.timestamp || '').localeCompare(a.timestamp || ''),
   );

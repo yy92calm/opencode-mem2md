@@ -20,7 +20,8 @@ const user = 'tester';
 const wsA = '/Users/tester/projects/alpha';
 const wsB = '/Users/tester/projects/beta';
 const now = new Date().toISOString();
-const today = now.slice(0, 10);
+// localtime() in SQLite buckets by the process timezone; match it here.
+const today = new Date().toLocaleDateString('en-CA'); // YYYY-MM-DD, local
 
 const results = [];
 const check = (name, ok, detail = '') => results.push({ name, ok, detail });
@@ -103,6 +104,27 @@ check('stats focus topics', stats.focus_topics === 2, String(stats.focus_topics)
 repo.upsertFocus({ user_id: user, workspace: wsA, topic: 'stale topic', date: '2020-01-01' });
 const pruned = repo.pruneFocusOlderThan(14);
 check('stale focus pruned', pruned === 1, String(pruned));
+
+// --- governance: stale auto memories are retired, manual ones survive ---
+const oldTs = new Date(Date.now() - 100 * 24 * 3600 * 1000).toISOString();
+for (let i = 0; i < 4; i++) {
+  repo.insertHard({
+    user_id: user, type: 'fact', title: `stale auto ${i}`, content: 'x'.repeat(100),
+    facts: [], concepts: [], source: 'auto', priority: 'medium', timestamp: oldTs,
+  });
+}
+repo.insertHard({
+  user_id: user, type: 'preference', title: 'manual old but important',
+  content: 'x'.repeat(100), facts: [], concepts: [], source: 'manual', priority: 'high', timestamp: oldTs,
+});
+const retired = repo.deprecateStaleAutoMemories(user, 60);
+check('stale auto retired', retired === 4, String(retired));
+check('manual memory untouched', repo.getStats(user).hard_active === 2, String(repo.getStats(user).hard_active));
+
+// --- governance: cap evicts the lowest-value rows, keeps manual high ---
+const evicted = repo.enforceHardMemoryCap(user, 1);
+check('cap evicts lowest value', evicted === 1, String(evicted));
+check('manual high survives cap', repo.getStats(user).hard_active === 1);
 
 schema.closeDb();
 rmSync(dir, { recursive: true, force: true });

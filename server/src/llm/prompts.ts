@@ -67,7 +67,7 @@ Rules:
 - Skip transient chatter, questions, and anything only true for that moment.
 - "constraint" = must/must-not rules (e.g. "don't refactor module X"); "pattern" = recurring working habits.
 - scope="workspace" when the fact only holds for the specific project/repo/directory worked on (its scripts, ports, file layout, deployment target, local conventions). scope="global" for things true across all projects (personal preferences, machine setup, general decisions).
-- At most 10 atoms. Return { "atoms": [] } when nothing durable exists.
+- At most 5 atoms. Return { "atoms": [] } when nothing durable exists.
 - NEVER duplicate items listed under "Already known" — no rephrasings of them either.
 - Do NOT invent facts not present in the conversations.`;
 
@@ -209,7 +209,7 @@ export async function extractAtoms(
 
   const list: any[] = Array.isArray(parsed) ? parsed : (Array.isArray(parsed?.atoms) ? parsed.atoms : []);
   const atoms: AtomExtract[] = [];
-  for (const item of list.slice(0, 10)) {
+  for (const item of list.slice(0, 5)) {
     if (!item || typeof item.title !== 'string' || !item.title.trim()) continue;
     const type = ATOM_TYPES.includes(item.type) ? item.type : 'fact';
     atoms.push({
@@ -231,13 +231,40 @@ export async function extractAtoms(
  * system prompt separately by the plugin, so including them here would
  * duplicate content and blur the observed/asserted distinction.
  */
+/**
+ * Render a stored daily summary for the profile prompt. Summaries are JSON
+ * blobs (narrative/decisions/problems/preferences/topics); passing the raw
+ * JSON made the profile model skim structure instead of content, so extract
+ * the human-readable fields and fall back to the raw text if parsing fails.
+ */
+function formatSummaryForProfile(s: DailySummary): string {
+  const header = `### ${s.date} (${s.raw_count} msgs)`;
+  try {
+    const parsed = JSON.parse(s.content);
+    if (parsed && typeof parsed === 'object') {
+      const lines: string[] = [header];
+      if (parsed.narrative) lines.push(`Narrative: ${parsed.narrative}`);
+      const section = (label: string, key: string) => {
+        const items = Array.isArray(parsed[key]) ? parsed[key].filter((x: any) => typeof x === 'string' && x.trim()) : [];
+        if (items.length > 0) lines.push(`${label}:\n${items.map((x: string) => `- ${x}`).join('\n')}`);
+      };
+      section('Topics', 'topics');
+      section('Decisions', 'decisions');
+      section('Problems', 'problems');
+      section('Preferences observed', 'preferences_observed');
+      return lines.join('\n');
+    }
+  } catch {
+    /* not JSON — use raw content */
+  }
+  return `${header}\n${s.content.slice(0, 1500)}`;
+}
+
 export async function generateProfile(
   user_id: string,
   summaries: DailySummary[],
 ): Promise<string> {
-  const summariesText = summaries
-    .map(s => `### ${s.date} (${s.raw_count} msgs)\n${s.content}`)
-    .join('\n\n');
+  const summariesText = summaries.map(formatSummaryForProfile).join('\n\n');
 
   const userContent = `User: ${user_id}
 

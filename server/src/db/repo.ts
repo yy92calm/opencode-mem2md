@@ -613,6 +613,72 @@ export function listRecentSummaries(user_id: string, days: number): DailySummary
     .all(user_id, days) as DailySummary[];
 }
 
+/** Most recent summaries regardless of age — fallback when the 7-day window is sparse. */
+export function listLatestSummaries(user_id: string, limit = 10): DailySummary[] {
+  return getDb()
+    .prepare(`SELECT * FROM daily_summaries WHERE user_id = ? ORDER BY date DESC LIMIT ?`)
+    .all(user_id, limit) as DailySummary[];
+}
+
+// ===== Memory governance (keep the active store focused) =====
+
+/**
+ * Deprecate auto-distilled memories that were never recalled and have aged
+ * past `days`. Manual (user-asserted) memories are never touched. Soft delete
+ * only — rows stay auditable and can be reactivated.
+ */
+export function deprecateStaleAutoMemories(user_id: string, days = 60): number {
+  const result = getDb()
+    .prepare(`
+      UPDATE hard_memories SET status = 'deprecated'
+      WHERE user_id = ? AND status = 'active' AND source = 'auto'
+        AND usage_count = 0 AND priority != 'high'
+        AND timestamp < datetime('now', '-' || ? || ' days')
+    `)
+    .run(user_id, days);
+  return Number(result.changes);
+}
+
+/**
+ * Cap the number of active hard memories. When over the cap, the lowest-value
+ * rows are deprecated first. Score = recall count (dominant) -> manual source
+ * -> priority -> recency. Manual high-priority memories rank highest and are
+ * effectively never evicted.
+ */
+export function enforceHardMemoryCap(user_id: string, cap = 150): number {
+  const total = countHardActive(user_id);
+  if (total <= cap) return 0;
+
+  const excess = total - cap;
+  const rows = getDb()
+    .prepare(`
+      SELECT id FROM hard_memories
+      WHERE user_id = ? AND status = 'active'
+      ORDER BY
+        usage_count ASC,
+        CASE source WHEN 'manual' THEN 1 ELSE 0 END ASC,
+        CASE priority WHEN 'high' THEN 2 WHEN 'medium' THEN 1 ELSE 0 END ASC,
+        timestamp ASC
+      LIMIT ?
+    `)
+    .all(user_id, excess) as { id: number }[];
+
+  if (rows.length === 0) return 0;
+  const ids = rows.map(r => r.id);
+  const placeholders = ids.map(() => '?').join(',');
+  const result = getDb()
+    .prepare(`UPDATE hard_memories SET status = 'deprecated' WHERE id IN (${placeholders})`)
+    .run(...ids);
+  return Number(result.changes);
+}
+
+function countHardActive(user_id: string): number {
+  const row = getDb()
+    .prepare(`SELECT COUNT(*) c FROM hard_memories WHERE user_id = ? AND status = 'active'`)
+    .get(user_id) as { c: number };
+  return row.c;
+}
+
 // ===== User profiles =====
 
 export function upsertProfile(p: UserProfile): void {

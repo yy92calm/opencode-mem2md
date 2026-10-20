@@ -6,7 +6,9 @@ import {
   listWorkspaceCountsByDate,
   upsertDailySummary,
   listRecentSummaries,
+  listLatestSummaries,
   upsertProfile,
+  getProfile,
   getProfileMeta,
   updateProfileMeta,
   getMaxHardId,
@@ -20,6 +22,8 @@ import {
   insertWorkspaceMemory,
   upsertFocus,
   pruneFocusOlderThan,
+  deprecateStaleAutoMemories,
+  enforceHardMemoryCap,
   listHard,
   setHardStatus,
   updateHardContent,
@@ -42,6 +46,14 @@ function log(level: string, msg: string, extra?: object) {
 // dailyInFlight coalesces same-day daily summaries (cron + manual trigger).
 const profileInFlight = new Set<string>();
 const dailyInFlight = new Set<string>();
+
+// Governance thresholds for the global hard-memory store. Memory that is never
+// recalled and ages out is deprecated (not deleted), keeping the active set
+// small enough to stay useful in the per-turn injection budget.
+const HARD_MEMORY_CAP = 150;
+const STALE_AUTO_DAYS = 60;
+/** Minimum body length for an auto-distilled atom; shorter ones are noise. */
+const MIN_ATOM_CONTENT = 80;
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
@@ -107,6 +119,20 @@ export async function runDailySummary(): Promise<void> {
   } catch (e) {
     log('warn', `focus prune failed`, { error: String(e) });
   }
+
+  // Retire auto memories nobody has recalled in a while. Manual memories and
+  // high-priority items are never touched.
+  for (const user_id of users) {
+    try {
+      const retired = deprecateStaleAutoMemories(user_id, STALE_AUTO_DAYS);
+      const evicted = enforceHardMemoryCap(user_id, HARD_MEMORY_CAP);
+      if (retired > 0 || evicted > 0) {
+        log('info', `memory governance`, { user_id, retired_stale: retired, evicted_over_cap: evicted });
+      }
+    } catch (e) {
+      log('warn', `memory governance failed`, { user_id, error: String(e) });
+    }
+  }
 }
 
 /**
@@ -163,6 +189,15 @@ export async function runDailySummaryForUser(user_id: string, date: string = yes
       }
     }
 
+    // Keep the profile in step with new observations (3-day freshness gate).
+    if (result) {
+      try {
+        await maybeRefreshProfileAfterSummary(user_id);
+      } catch (e) {
+        log('error', `profile refresh after summary failed`, { user_id, date, error: String(e) });
+      }
+    }
+
     return result !== null;
   } finally {
     dailyInFlight.delete(key);
@@ -205,6 +240,9 @@ async function distillAtomsForUser(user_id: string, date: string, raws: RawConve
   for (const atom of atoms) {
     const key = atom.title.trim().toLowerCase();
     if (known.has(key)) continue; // cross-day dup or intra-batch dup
+    // Quality gate: a one-line atom without substance is not worth a slot in
+    // the injected memory budget or a profile signal.
+    if (atom.content.trim().length < MIN_ATOM_CONTENT) continue;
     known.add(key);
 
     const sessionId = atom.session ? prefixMap.get(atom.session) ?? null : null;
@@ -248,6 +286,12 @@ async function distillAtomsForUser(user_id: string, date: string, raws: RawConve
   // Advance the watermark even when zero atoms were extracted — those raws
   // have been considered; re-running must not pay for another LLM call.
   setDistillState(user_id, date, Math.max(maxId, lastId));
+
+  // Keep the active store bounded. Runs after each distill so growth is
+  // gradual and predictable instead of waiting for the monthly job.
+  const evicted = enforceHardMemoryCap(user_id, HARD_MEMORY_CAP);
+  if (evicted > 0) log('info', `hard memories capped`, { user_id, evicted, cap: HARD_MEMORY_CAP });
+
   if (inserted > 0 || insertedWorkspace > 0 || atoms.length > 0) {
     log('info', `atoms distilled`, {
       user_id, date, extracted: atoms.length, inserted_global: inserted,
@@ -347,19 +391,25 @@ export async function regenerateProfileForUser(user_id: string, reason: string):
 }
 
 async function doRegenerateProfile(user_id: string, reason: string): Promise<void> {
-  const summaries = listRecentSummaries(user_id, 7);
+  // Prefer the last 7 days, but fall back to the latest summaries when the
+  // window is sparse. A user who works in bursts would otherwise get an empty
+  // "(pending more data)" profile written over a perfectly good older one.
+  let summaries = listRecentSummaries(user_id, 7);
+  if (summaries.length < 3) {
+    const latest = listLatestSummaries(user_id, 10);
+    if (latest.length > summaries.length) summaries = latest;
+  }
   // Hard memories are never fed to the profile LLM — they're injected into the
-  // system prompt separately by the plugin. So we only need a count here, not
-  // the full rows. Saves deserializing 200 rows on every refresh.
+  // system prompt separately by the plugin. So we only need a count here.
   const hardCount = countHard(user_id);
 
-  if (summaries.length === 0 && hardCount === 0) {
-    log('debug', `profile skip empty`, { user_id });
+  // Never overwrite a real profile with an empty one: no summaries means no
+  // observed behaviour to synthesize from.
+  if (summaries.length === 0) {
+    log('debug', `profile skip (no summaries)`, { user_id, reason });
     return;
   }
 
-  // Profile is built from observed summaries only; hard memories are
-  // injected into the system prompt separately by the plugin.
   const content = await generateProfile(user_id, summaries);
   upsertProfile({
     user_id,
@@ -370,7 +420,22 @@ async function doRegenerateProfile(user_id: string, reason: string): Promise<voi
     source_memory_count: hardCount,
   });
   updateProfileMeta(user_id, getMaxHardId(user_id));
-  log('info', `profile updated`, { user_id, reason, lines: content.split('\n').length });
+  log('info', `profile updated`, {
+    user_id, reason, lines: content.split('\n').length, summaries: summaries.length,
+  });
+}
+
+/**
+ * Refresh the profile after a new daily summary lands, but only when the
+ * current one is missing or older than a few days. Keeps the profile fresh
+ * without paying for an extra LLM call every day.
+ */
+async function maybeRefreshProfileAfterSummary(user_id: string): Promise<void> {
+  const profile = getProfile(user_id);
+  const stale = !profile
+    || Date.now() - new Date(profile.generated_at).getTime() > 3 * 24 * 60 * 60 * 1000;
+  if (!stale) return;
+  await regenerateProfileForUser(user_id, 'daily');
 }
 
 /**

@@ -39,6 +39,7 @@ function clampSection(text: string, budget: number): string {
 }
 
 interface MemoryLike {
+  id?: number;
   type: string;
   title: string;
   content: string;
@@ -67,9 +68,13 @@ function rankMemories<T extends MemoryLike>(memories: T[]): T[] {
   );
 }
 
-/** Build a budgeted bullet list, reporting how many items were omitted. */
-function memorySection(memories: MemoryLike[], budget: number): { text: string; omitted: number } {
+/** Build a budgeted bullet list, reporting how many items were omitted and which fit. */
+function memorySection<T extends MemoryLike>(
+  memories: T[],
+  budget: number,
+): { text: string; omitted: number; injected: T[] } {
   const lines: string[] = [];
+  const injected: T[] = [];
   let used = 0;
   let omitted = 0;
   for (const memory of memories) {
@@ -79,9 +84,10 @@ function memorySection(memories: MemoryLike[], budget: number): { text: string; 
       continue;
     }
     lines.push(line);
+    injected.push(memory);
     used += line.length;
   }
-  return { text: lines.join('\n'), omitted };
+  return { text: lines.join('\n'), omitted, injected };
 }
 
 export default Plugin.define({
@@ -426,26 +432,30 @@ export default Plugin.define({
       }
 
       const parts: string[] = [];
+      const injectedHardIds: number[] = [];
+      const injectedWorkspaceIds: number[] = [];
 
       // 1. Workspace memories (this directory only)
       if (bundle?.workspace_memories?.length) {
-        const { text, omitted } = memorySection(rankMemories(bundle.workspace_memories), cfg.workspace_char_budget);
-        if (text) {
-          const hint = omitted > 0 ? `\n(${omitted} more workspace memories omitted — use mem_search scope=workspace)` : '';
+        const section = memorySection(rankMemories(bundle.workspace_memories), cfg.workspace_char_budget);
+        if (section.text) {
+          const hint = section.omitted > 0 ? `\n(${section.omitted} more workspace memories omitted — use mem_search scope=workspace)` : '';
           parts.push(
-            `\n\n## Workspace Memory (${shortWorkspace(workspace)})\n\n${clampSection(text, cfg.workspace_char_budget)}${hint}`,
+            `\n\n## Workspace Memory (${shortWorkspace(workspace)})\n\n${clampSection(section.text, cfg.workspace_char_budget)}${hint}`,
           );
+          injectedWorkspaceIds.push(...section.injected.map(m => m.id).filter((id): id is number => typeof id === 'number'));
         }
       }
 
       // 2. Global hard memories (user-asserted + auto-distilled)
       if (bundle?.hard_memories?.length) {
-        const { text, omitted } = memorySection(rankMemories(bundle.hard_memories), cfg.hard_char_budget);
-        if (text) {
-          const hint = omitted > 0 ? `\n(${omitted} more memories omitted — use mem_search to recall them)` : '';
+        const section = memorySection(rankMemories(bundle.hard_memories), cfg.hard_char_budget);
+        if (section.text) {
+          const hint = section.omitted > 0 ? `\n(${section.omitted} more memories omitted — use mem_search to recall them)` : '';
           parts.push(
-            `\n\n## Hard Memories (user-asserted + auto-distilled)\n\n${clampSection(text, cfg.hard_char_budget)}${hint}`,
+            `\n\n## Hard Memories (user-asserted + auto-distilled)\n\n${clampSection(section.text, cfg.hard_char_budget)}${hint}`,
           );
+          injectedHardIds.push(...section.injected.map(m => m.id).filter((id): id is number => typeof id === 'number'));
         }
       }
 
@@ -472,6 +482,11 @@ export default Plugin.define({
 
       if (parts.length > 0) {
         event.system.push({ type: 'text', text: parts.join('\n') });
+      }
+
+      // Report actual injection for recall accounting (fire-and-forget).
+      if (injectedHardIds.length > 0 || injectedWorkspaceIds.length > 0) {
+        void worker.touchMemories(injectedHardIds, injectedWorkspaceIds);
       }
     });
 

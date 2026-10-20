@@ -128,17 +128,16 @@ workspaceRoutes.post('/focus', async (c) => {
 });
 
 /**
- * GET /api/workspace/context?workspace=...&days=7&touch=1
+ * GET /api/workspace/context?workspace=...&days=7
  * Single round-trip for the plugin's per-turn injection:
  *   { profile, workspace_memories, hard_memories, focus }
- * `touch=1` counts the served memories as used (the plugin sets it; the UI
- * deliberately does not, so browsing does not inflate recall counts).
+ * Reading is side-effect free; the plugin reports what it actually injected
+ * via POST /api/memory/touch so recall counts stay meaningful.
  */
 workspaceRoutes.get('/context', (c) => {
   const user_id = c.get('user_id');
   const workspace = workspaceParam(c);
   const days = Math.min(Math.max(parseInt(c.req.query('days') || '7') || 7, 1), 90);
-  const touch = c.req.query('touch') === '1';
-  const bundle = getContextBundle(user_id, workspace, { focus_days: days, touch });
+  const bundle = getContextBundle(user_id, workspace, { focus_days: days });
   return c.json(bundle);
 });

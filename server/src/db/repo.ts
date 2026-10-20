@@ -583,31 +583,18 @@ export function getContextBundle(user_id: string, workspace: string | null, opts
   workspace_limit?: number;
   focus_days?: number;
   focus_limit?: number;
-  /** Count served memories as used (the plugin passes true; UI does not). */
-  touch?: boolean;
 }): ContextBundle {
   const hardLimit = Math.min(Math.max(opts?.hard_limit ?? 50, 1), 200);
   const wsLimit = Math.min(Math.max(opts?.workspace_limit ?? 30, 1), 200);
   const focusDays = Math.min(Math.max(opts?.focus_days ?? 7, 1), 90);
   const focusLimit = Math.min(Math.max(opts?.focus_limit ?? 8, 1), 50);
 
-  const workspaceMemories = workspace ? listWorkspaceMemories(user_id, workspace, wsLimit) : [];
-  const hardMemories = listHard(user_id, hardLimit, false, 'value');
-
-  // Injection counts as use: without this, usage_count stays 0 for memories
-  // that are seen every turn, and governance would evict them as "unused".
-  if (opts?.touch) {
-    const hardIds = hardMemories.map(m => m.id).filter((id): id is number => typeof id === 'number');
-    const wsIds = workspaceMemories.map(m => m.id).filter((id): id is number => typeof id === 'number');
-    if (hardIds.length > 0) touchHardUsage(hardIds);
-    if (wsIds.length > 0) touchWorkspaceUsage(wsIds);
-  }
-
   return {
     workspace,
     profile: getProfile(user_id)?.content ?? null,
-    workspace_memories: workspaceMemories,
-    hard_memories: hardMemories,
+    workspace_memories: workspace ? listWorkspaceMemories(user_id, workspace, wsLimit) : [],
+    // 'value' ranks what is worth injecting: manual -> recalled -> priority.
+    hard_memories: listHard(user_id, hardLimit, false, 'value'),
     focus: listFocus(user_id, workspace, focusDays, focusLimit),
   };
 }

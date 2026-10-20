@@ -12,6 +12,7 @@ import {
   touchWorkspaceUsage,
   getStats,
 } from '../db/repo.js';
+import { getDb } from '../db/schema.js';
 import { maybeTriggerProfileRefresh } from '../cron/jobs.js';
 import { hardMemorySchema, memoryStatusSchema, safeParse } from '../validation.js';
 
@@ -189,6 +190,36 @@ memoryRoutes.get('/search', (c) => {
   }
 
   return c.json({ items, truncated });
+});
+
+/**
+ * POST /api/memory/touch
+ * Body: { ids?: number[], workspace_ids?: number[] }
+ * The plugin reports memories it actually injected into the prompt, so recall
+ * counters measure real use instead of every candidate that was fetched.
+ */
+memoryRoutes.post('/touch', async (c) => {
+  const user_id = c.get('user_id');
+  const body = await c.req.json().catch(() => null);
+  if (!body || typeof body !== 'object') return c.json({ error: 'Invalid body' }, 400);
+
+  const clean = (v: unknown): number[] =>
+    Array.isArray(v) ? v.filter((x): x is number => Number.isInteger(x) && x > 0).slice(0, 200) : [];
+
+  const ids = clean((body as any).ids);
+  const workspaceIds = clean((body as any).workspace_ids);
+
+  // Verify ownership before bumping counters.
+  const hardIds = ids.length
+    ? (getDb().prepare(`SELECT id FROM hard_memories WHERE user_id = ? AND id IN (${ids.map(() => '?').join(',')})`).all(user_id, ...ids) as { id: number }[]).map(r => r.id)
+    : [];
+  const wsIds = workspaceIds.length
+    ? (getDb().prepare(`SELECT id FROM workspace_memories WHERE user_id = ? AND id IN (${workspaceIds.map(() => '?').join(',')})`).all(user_id, ...workspaceIds) as { id: number }[]).map(r => r.id)
+    : [];
+
+  if (hardIds.length > 0) touchHardUsage(hardIds);
+  if (wsIds.length > 0) touchWorkspaceUsage(wsIds);
+  return c.json({ touched: hardIds.length + wsIds.length });
 });
 
 /**

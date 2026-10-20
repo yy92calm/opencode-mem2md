@@ -50,7 +50,10 @@ const focusCount = await page.evaluate(() => document.querySelectorAll('#focusLi
 
 // hard search
 await page.click('.tab[data-page="hard"]');
-await page.waitForTimeout(1200);
+await page.waitForFunction(
+  () => document.querySelectorAll('#hardList .mem').length > 0,
+  { timeout: 6000 },
+).catch(() => {});
 const hardCount = await page.evaluate(() => document.querySelectorAll('#hardList .mem').length);
 
 console.log(JSON.stringify({ summary, profileLen, focusCount, hardCount, errors }, null, 2));

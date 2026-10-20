@@ -174,8 +174,6 @@ export class WorkerClient {
       const qs = new URLSearchParams();
       if (workspace) qs.set('workspace', workspace);
       qs.set('days', String(days));
-      // Injection counts as recall (see getContextBundle on the Worker).
-      qs.set('touch', '1');
       const bundle = await this.get<ContextBundle>(`/api/workspace/context?${qs.toString()}`, this.cfg.profile_fetch_timeout_ms);
       if (bundle) {
         this.contextCache = { value: bundle, at: Date.now(), workspace };
@@ -261,6 +259,20 @@ export class WorkerClient {
     if (workspace) qs.set('workspace', workspace);
     const result = await this.get<{ items: RecentFocus[] }>(`/api/workspace/focus?${qs.toString()}`);
     return result?.items ?? [];
+  }
+
+  /**
+   * Report which memories were actually injected into the prompt, so the
+   * Worker's recall counters reflect real use (not every fetched candidate).
+   * Fire-and-forget: failures must never affect a model request.
+   */
+  async touchMemories(hardIds: number[], workspaceIds: number[]): Promise<void> {
+    if (hardIds.length === 0 && workspaceIds.length === 0) return;
+    try {
+      await this.post('/api/memory/touch', { ids: hardIds, workspace_ids: workspaceIds }, this.cfg.profile_fetch_timeout_ms);
+    } catch (e) {
+      this.log('debug', 'memory touch failed', { error: String(e) });
+    }
   }
 
   /** Workspace-scoped memories for one directory. */

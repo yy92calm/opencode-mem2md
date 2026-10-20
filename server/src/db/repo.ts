@@ -1,15 +1,16 @@
 import { getDb } from './schema.js';
-import type { RawConversation, HardMemory, DailySummary, UserProfile, SkillDraft } from '../types/index.js';
+import type { RawConversation, HardMemory, WorkspaceMemory, RecentFocus, DailySummary, UserProfile, SkillDraft } from '../types/index.js';
 
 // ===== Raw conversations =====
 
 export function insertRaw(r: Omit<RawConversation, 'id'>): number {
   const stmt = getDb().prepare(`
-    INSERT INTO raw_conversations (user_id, session_id, role, content, tool_name, tool_input, tool_output, timestamp)
-    VALUES (@user_id, @session_id, @role, @content, @tool_name, @tool_input, @tool_output, @timestamp)
+    INSERT INTO raw_conversations (user_id, session_id, workspace, role, content, tool_name, tool_input, tool_output, timestamp)
+    VALUES (@user_id, @session_id, @workspace, @role, @content, @tool_name, @tool_input, @tool_output, @timestamp)
   `);
   const r2 = {
     ...r,
+    workspace: r.workspace ?? null,
     tool_name: r.tool_name ?? null,
     tool_input: r.tool_input ?? null,
     tool_output: r.tool_output ?? null,
@@ -21,13 +22,14 @@ export function insertRaw(r: Omit<RawConversation, 'id'>): number {
 export function insertRawBatch(items: Omit<RawConversation, 'id'>[]): number {
   if (items.length === 0) return 0;
   const stmt = getDb().prepare(`
-    INSERT INTO raw_conversations (user_id, session_id, role, content, tool_name, tool_input, tool_output, timestamp)
-    VALUES (@user_id, @session_id, @role, @content, @tool_name, @tool_input, @tool_output, @timestamp)
+    INSERT INTO raw_conversations (user_id, session_id, workspace, role, content, tool_name, tool_input, tool_output, timestamp)
+    VALUES (@user_id, @session_id, @workspace, @role, @content, @tool_name, @tool_input, @tool_output, @timestamp)
   `);
   const tx = getDb().transaction((rows: any[]) => {
     for (const r of rows) {
       stmt.run({
         ...r,
+        workspace: r.workspace ?? null,
         tool_name: r.tool_name ?? null,
         tool_input: r.tool_input ?? null,
         tool_output: r.tool_output ?? null,
@@ -52,6 +54,32 @@ export function countRawByDate(user_id: string, date: string): number {
     .prepare(`SELECT COUNT(*) as c FROM raw_conversations WHERE user_id = ? AND date(datetime(timestamp, 'localtime')) = ?`)
     .get(user_id, date) as { c: number };
   return row.c;
+}
+
+/** Raw counts per workspace for one day, most active first. */
+export function listWorkspaceCountsByDate(user_id: string, date: string): { workspace: string; count: number }[] {
+  return getDb()
+    .prepare(`
+      SELECT COALESCE(workspace, '') AS workspace, COUNT(*) AS count
+      FROM raw_conversations
+      WHERE user_id = ? AND date(datetime(timestamp, 'localtime')) = ?
+      GROUP BY COALESCE(workspace, '')
+      ORDER BY count DESC
+    `)
+    .all(user_id, date) as { workspace: string; count: number }[];
+}
+
+/** Distinct workspaces a user has worked in recently (for focus/summary scoping). */
+export function listRecentWorkspaces(user_id: string, days = 7): string[] {
+  const rows = getDb()
+    .prepare(`
+      SELECT workspace FROM raw_conversations
+      WHERE user_id = ? AND workspace IS NOT NULL AND workspace != ''
+        AND timestamp >= datetime('now', '-' || ? || ' days')
+      GROUP BY workspace ORDER BY MAX(timestamp) DESC
+    `)
+    .all(user_id, days) as { workspace: string }[];
+  return rows.map(r => r.workspace);
 }
 
 /**
@@ -302,6 +330,229 @@ function deserializeHard(row: any): HardMemory {
   };
 }
 
+// ===== Workspace memories =====
+
+export type WorkspaceMemoryInsert = Omit<WorkspaceMemory, 'id' | 'status' | 'usage_count' | 'last_used_at' | 'source_date'> & {
+  status?: 'active' | 'deprecated';
+  source_date?: string | null;
+};
+
+/**
+ * Insert a workspace memory. Re-asserting the same title in the same workspace
+ * refreshes the existing row (content/facts/timestamp) instead of duplicating;
+ * a manual write also promotes the row to manual priority.
+ */
+export function insertWorkspaceMemory(m: WorkspaceMemoryInsert): number {
+  const db = getDb();
+  const existing = db
+    .prepare(`SELECT id FROM workspace_memories WHERE user_id = ? AND workspace = ? AND lower(trim(title)) = lower(trim(?))`)
+    .get(m.user_id, m.workspace, m.title) as { id: number } | undefined;
+
+  if (existing) {
+    db.prepare(`
+      UPDATE workspace_memories SET
+        type = @type, content = @content, facts = @facts, concepts = @concepts,
+        source = @source, status = 'active', session_id = @session_id,
+        source_date = COALESCE(@source_date, source_date), timestamp = @timestamp
+      WHERE id = @id
+    `).run({
+      ...m,
+      id: existing.id,
+      facts: JSON.stringify(m.facts),
+      concepts: JSON.stringify(m.concepts),
+      source_date: m.source_date ?? null,
+      session_id: m.session_id ?? null,
+    });
+    return existing.id;
+  }
+
+  const result = db.prepare(`
+    INSERT INTO workspace_memories
+      (user_id, workspace, type, title, content, facts, concepts, source, status, session_id, source_date, timestamp)
+    VALUES
+      (@user_id, @workspace, @type, @title, @content, @facts, @concepts, @source, @status, @session_id, @source_date, @timestamp)
+  `).run({
+    ...m,
+    facts: JSON.stringify(m.facts),
+    concepts: JSON.stringify(m.concepts),
+    status: m.status ?? 'active',
+    source_date: m.source_date ?? null,
+    session_id: m.session_id ?? null,
+  });
+  return Number(result.lastInsertRowid);
+}
+
+export function listWorkspaceMemories(user_id: string, workspace: string, limit = 50): WorkspaceMemory[] {
+  const rows = getDb()
+    .prepare(`
+      SELECT * FROM workspace_memories
+      WHERE user_id = ? AND workspace = ? AND status = 'active'
+      ORDER BY timestamp DESC LIMIT ?
+    `)
+    .all(user_id, workspace, limit) as any[];
+  return rows.map(deserializeWorkspaceMemory);
+}
+
+/** Search within a workspace; empty query lists recent memories. */
+export function searchWorkspaceMemories(user_id: string, workspace: string, query: string, limit = 50): WorkspaceMemory[] {
+  if (!query.trim()) return listWorkspaceMemories(user_id, workspace, limit);
+  const { longTerms, shortTerms } = splitQueryTerms(query);
+  const like = likeConditions(shortTerms, ['w.title', 'w.content', 'w.facts', 'w.concepts']);
+
+  let rows: any[];
+  if (longTerms.length > 0) {
+    const match = longTerms.map(t => `"${t.replace(/"/g, '""')}"`).join(' ');
+    rows = getDb()
+      .prepare(`
+        SELECT w.* FROM workspace_memories_fts fts
+        JOIN workspace_memories w ON w.id = fts.rowid
+        WHERE workspace_memories_fts MATCH ? AND w.user_id = ? AND w.workspace = ?
+          AND w.status = 'active' ${like.sql}
+        ORDER BY rank LIMIT ?
+      `)
+      .all(match, user_id, workspace, ...like.params, limit) as any[];
+  } else {
+    rows = getDb()
+      .prepare(`
+        SELECT w.* FROM workspace_memories w
+        WHERE w.user_id = ? AND w.workspace = ? AND w.status = 'active' ${like.sql}
+        ORDER BY w.timestamp DESC LIMIT ?
+      `)
+      .all(user_id, workspace, ...like.params, limit) as any[];
+  }
+  return rows.map(deserializeWorkspaceMemory);
+}
+
+export function touchWorkspaceUsage(ids: number[]): void {
+  if (ids.length === 0) return;
+  const placeholders = ids.map(() => '?').join(',');
+  getDb()
+    .prepare(`UPDATE workspace_memories SET usage_count = usage_count + 1, last_used_at = datetime('now') WHERE id IN (${placeholders})`)
+    .run(...ids);
+}
+
+export function countWorkspaceMemories(user_id: string, workspace: string): number {
+  const row = getDb()
+    .prepare(`SELECT COUNT(*) AS c FROM workspace_memories WHERE user_id = ? AND workspace = ? AND status = 'active'`)
+    .get(user_id, workspace) as { c: number };
+  return row.c;
+}
+
+function deserializeWorkspaceMemory(row: any): WorkspaceMemory {
+  return {
+    ...row,
+    facts: JSON.parse(row.facts || '[]'),
+    concepts: JSON.parse(row.concepts || '[]'),
+  };
+}
+
+// ===== Recent focus =====
+
+/**
+ * Upsert a focus topic for a user+workspace. Repeated sightings bump the
+ * weight (bounded) and refresh last_seen; the daily decay job removes stale
+ * topics, so this table stays a rolling "what am I working on" view.
+ */
+export function upsertFocus(input: {
+  user_id: string;
+  workspace: string | null;
+  topic: string;
+  detail?: string;
+  date: string;
+}): void {
+  const topic = input.topic.trim();
+  if (!topic) return;
+  getDb()
+    .prepare(`
+      INSERT INTO recent_focus (user_id, workspace, topic, detail, weight, last_seen)
+      VALUES (@user_id, @workspace, @topic, @detail, 1, @last_seen)
+      ON CONFLICT(user_id, workspace, topic) DO UPDATE SET
+        detail = CASE WHEN excluded.detail != '' THEN excluded.detail ELSE recent_focus.detail END,
+        weight = MIN(recent_focus.weight + 1, 10),
+        last_seen = MAX(recent_focus.last_seen, excluded.last_seen)
+    `)
+    .run({
+      user_id: input.user_id,
+      workspace: input.workspace ?? null,
+      topic,
+      detail: (input.detail ?? '').slice(0, 500),
+      last_seen: input.date,
+    });
+}
+
+/**
+ * Focus topics ranked by recency then weight.
+ * `workspace` = undefined → all workspaces; null → only global (unscoped) topics;
+ * a string → that workspace plus global topics (global topics apply everywhere).
+ */
+export function listFocus(
+  user_id: string,
+  workspace?: string | null,
+  days = 7,
+  limit = 8,
+): RecentFocus[] {
+  const params: any[] = [user_id, days];
+  let wsFilter = '';
+  if (workspace === null) {
+    wsFilter = `AND workspace IS NULL`;
+  } else if (typeof workspace === 'string' && workspace !== '') {
+    wsFilter = `AND (workspace = ? OR workspace IS NULL)`;
+    params.push(workspace);
+  }
+  params.push(limit);
+  return getDb()
+    .prepare(`
+      SELECT * FROM recent_focus
+      WHERE user_id = ? AND last_seen >= date('now', 'localtime', '-' || ? || ' days') ${wsFilter}
+      ORDER BY last_seen DESC, weight DESC
+      LIMIT ?
+    `)
+    .all(...params) as RecentFocus[];
+}
+
+/** Drop focus topics that have not been seen within `days`. */
+export function pruneFocusOlderThan(days = 14): number {
+  const result = getDb()
+    .prepare(`DELETE FROM recent_focus WHERE last_seen < date('now', 'localtime', '-' || ? || ' days')`)
+    .run(days);
+  return Number(result.changes);
+}
+
+// ===== Context bundle (layered injection) =====
+
+export interface ContextBundle {
+  workspace: string | null;
+  profile: string | null;
+  workspace_memories: WorkspaceMemory[];
+  hard_memories: HardMemory[];
+  focus: RecentFocus[];
+}
+
+/**
+ * One round-trip for the plugin's per-turn injection: profile + workspace
+ * memories + global hard memories + recent focus. The plugin still applies
+ * its own per-layer char budgets, so ranking (not truncation) lives here.
+ */
+export function getContextBundle(user_id: string, workspace: string | null, opts?: {
+  hard_limit?: number;
+  workspace_limit?: number;
+  focus_days?: number;
+  focus_limit?: number;
+}): ContextBundle {
+  const hardLimit = Math.min(Math.max(opts?.hard_limit ?? 50, 1), 200);
+  const wsLimit = Math.min(Math.max(opts?.workspace_limit ?? 30, 1), 200);
+  const focusDays = Math.min(Math.max(opts?.focus_days ?? 7, 1), 90);
+  const focusLimit = Math.min(Math.max(opts?.focus_limit ?? 8, 1), 50);
+
+  return {
+    workspace,
+    profile: getProfile(user_id)?.content ?? null,
+    workspace_memories: workspace ? listWorkspaceMemories(user_id, workspace, wsLimit) : [],
+    hard_memories: listHard(user_id, hardLimit),
+    focus: listFocus(user_id, workspace, focusDays, focusLimit),
+  };
+}
+
 // ===== Daily summaries =====
 
 export function upsertDailySummary(s: Omit<DailySummary, 'id'>): void {
@@ -488,6 +739,9 @@ export interface UserStats {
   profile_generated_at: string | null;
   skill_drafts_pending: number;
   skill_drafts_approved: number;
+  workspaces: number;
+  workspace_memories: number;
+  focus_topics: number;
   most_used_memories: { id: number; title: string; usage_count: number }[];
 }
 
@@ -507,6 +761,9 @@ export function getStats(user_id: string): UserStats {
     profile_generated_at: profile?.generated_at ?? null,
     skill_drafts_pending: one(`SELECT COUNT(*) c FROM skill_drafts WHERE user_id = ? AND status = 'draft'`, user_id).c,
     skill_drafts_approved: one(`SELECT COUNT(*) c FROM skill_drafts WHERE user_id = ? AND status = 'approved'`, user_id).c,
+    workspaces: one(`SELECT COUNT(DISTINCT workspace) c FROM raw_conversations WHERE user_id = ? AND workspace IS NOT NULL`, user_id).c,
+    workspace_memories: one(`SELECT COUNT(*) c FROM workspace_memories WHERE user_id = ? AND status = 'active'`, user_id).c,
+    focus_topics: one(`SELECT COUNT(*) c FROM recent_focus WHERE user_id = ?`, user_id).c,
     most_used_memories: db.prepare(`
       SELECT id, title, usage_count FROM hard_memories
       WHERE user_id = ? AND status = 'active' AND usage_count > 0

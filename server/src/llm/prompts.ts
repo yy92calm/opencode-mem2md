@@ -58,6 +58,7 @@ Output a JSON object: { "atoms": [ ... ] }. Each atom is one standalone memory:
   "content": "1-3 sentences, self-contained (no 'the user said' framing)",
   "facts": ["key fact 1", "..."],
   "concepts": ["tag1", "tag2"],
+  "scope": "global" | "workspace",
   "session": "the 8-char session prefix from the --- session ... --- marker this atom came from, or null"
 }
 
@@ -65,6 +66,7 @@ Rules:
 - Only extract information that would help a FUTURE session: stable preferences, confirmed decisions, hard constraints, project facts, recurring patterns, verified fixes.
 - Skip transient chatter, questions, and anything only true for that moment.
 - "constraint" = must/must-not rules (e.g. "don't refactor module X"); "pattern" = recurring working habits.
+- scope="workspace" when the fact only holds for the specific project/repo/directory worked on (its scripts, ports, file layout, deployment target, local conventions). scope="global" for things true across all projects (personal preferences, machine setup, general decisions).
 - At most 10 atoms. Return { "atoms": [] } when nothing durable exists.
 - NEVER duplicate items listed under "Already known" — no rephrasings of them either.
 - Do NOT invent facts not present in the conversations.`;
@@ -169,6 +171,8 @@ export interface AtomExtract {
   content: string;
   facts: string[];
   concepts: string[];
+  /** workspace = only true for that project; global = true everywhere */
+  scope: 'global' | 'workspace';
   /** 8-char session prefix for provenance mapping; null if unknown */
   session: string | null;
 }
@@ -214,6 +218,7 @@ export async function extractAtoms(
       content: typeof item.content === 'string' ? item.content.slice(0, 2000) : '',
       facts: Array.isArray(item.facts) ? item.facts.filter((f: any) => typeof f === 'string').slice(0, 10) : [],
       concepts: Array.isArray(item.concepts) ? item.concepts.filter((c: any) => typeof c === 'string').slice(0, 10) : [],
+      scope: item.scope === 'workspace' ? 'workspace' : 'global',
       session: typeof item.session === 'string' && item.session.length >= 8 ? item.session.slice(0, 8) : null,
     });
   }

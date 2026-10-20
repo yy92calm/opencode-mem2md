@@ -13,7 +13,7 @@ const OPENCODE_CONFIG_DIR = join(HOME, '.config', 'opencode');
 const OPENCODE_PLUGINS_DIR = join(OPENCODE_CONFIG_DIR, 'plugins');
 const OPENCODE_SKILLS_DIR = join(OPENCODE_CONFIG_DIR, 'skills');
 
-const SKILL_NAMES = ['mem-search', 'mem-capture', 'mem-profile', 'mem-remember'];
+const SKILL_NAMES = ['mem-search', 'mem-capture', 'mem-profile', 'mem-remember', 'mem-focus'];
 
 function install() {
   console.log('Installing opencode-mem...\n');
@@ -58,7 +58,7 @@ function install() {
   console.log('     or create ~/.config/opencode/mem/config.json (see config.example.json)');
   console.log('  2. Start the Worker (see server/README.md)');
   console.log('  3. Restart OpenCode');
-  console.log('  4. Tools available: mem_capture, mem_search, mem_list, mem_profile, mem_health, mem_skill_sync');
+  console.log('  4. Tools available: mem_capture, mem_search, mem_focus, mem_list, mem_profile, mem_health, mem_skill_sync');
   console.log('\nRequires OpenCode V2 (2.0.x). The plugin uses the V2 plugin API');
   console.log('(Plugin.define + ctx.tool/session hooks). OpenCode V2 auto-loads');
   console.log('files placed in ~/.config/opencode/plugins/ — no config change needed.');

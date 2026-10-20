@@ -31,11 +31,24 @@ This monorepo has two parts:
 1. **Raw conversations** — every tool call + user message, batched and flushed by the plugin. Cheap, lossy, pruned after 90 days.
 2. **Hard memories** — explicit "记住 X / remember X" entries created via the `mem-remember` skill. Stored forever, FTS5-searchable.
 
+**Four memory layers, injected per turn:**
+
+| Layer | Store | Scope | Source |
+|---|---|---|---|
+| **Workspace memory** | `workspace_memories` | one directory/project | auto-distilled (`scope=workspace`) + `mem_capture scope=workspace` |
+| **Hard memory** | `hard_memories` | all workspaces | user-asserted "记住 X" + auto-distilled global atoms |
+| **User profile** | `user_profiles` | global | weekly LLM synthesis of daily summaries |
+| **Recent focus** | `recent_focus` | rolling 7-day window | daily-summary topics, weight ×N when recurring |
+
+Each layer has its own char budget (`workspace_char_budget`, `hard_char_budget`,
+`profile_char_budget`, `focus_char_budget`), so one large layer cannot starve the
+others. Anything omitted from injection stays reachable via `mem_search`.
+
 **Three scheduled jobs run inside the Worker:**
 
 | When                   | What                                                      |
 |------------------------|-----------------------------------------------------------|
-| Every day at 03:00     | LLM distills yesterday's raw conversations → daily summary + atom memories (`source='auto'`, searchable, traceable) |
+| Every day at 03:00     | LLM distills yesterday's raw conversations → daily summary + atom memories (global or workspace-scoped) + recent-focus topics; stale focus pruned after 14 days |
 | Every Sunday at 03:00  | LLM builds profile from last 7 daily summaries; long successful sessions → skill drafts (need approval) |
 | When user adds ≥10 new hard memories | LLM refreshes profile immediately                |
 | Monthly (1st, 04:00)   | Raw prune (>90 days) + LLM consolidation (merge duplicates, deprecate stale memories) |
@@ -112,7 +125,12 @@ All thresholds are tunable in the plugin config:
 | `profile_fetch_timeout_ms`   | 2 000   | Profile fetch timeout on chat startup |
 | `profile_cache_ttl_ms`       | 60 000  | In-memory profile cache TTL (0 disables) |
 | `memories_cache_ttl_ms`      | 30 000  | In-memory hard-memory cache TTL (0 disables) |
-| `inject_char_budget`         | 6 000   | Character budget for injected memories |
+| `inject_char_budget`         | 6 000   | Legacy total; split 25/27/33/10 across profile/workspace/hard/focus |
+| `profile_char_budget`        | 1 500   | Max chars for the profile layer |
+| `workspace_char_budget`      | 1 600   | Max chars for the workspace-memory layer |
+| `hard_char_budget`           | 2 000   | Max chars for the global hard-memory layer |
+| `focus_char_budget`          | 600     | Max chars for the recent-focus layer |
+| `focus_days`                 | 7       | Recent-focus lookback window |
 | `offline_cache_path`         | `~/.config/opencode/mem/offline.jsonl` | JSONL append-log |
 | `offline_cache_max_bytes`    | `10485760` | Rotation threshold (10 MB) |
 | `profile_cache_path`         | `~/.config/opencode/mem/profile.cache.md` | Last-known profile |
@@ -133,8 +151,9 @@ Six tools backed by Worker HTTP calls:
 
 | Tool | Purpose |
 |---|---|
-| `mem_capture` | Insert a hard memory (called by `mem-remember` skill) |
-| `mem_search` | Full-text search hard memories |
+| `mem_capture` | Insert a hard memory (`scope=global\|workspace`) |
+| `mem_search` | Search global + workspace memories |
+| `mem_focus` | Show recent focus topics (rolling window) |
 | `mem_list` | List recent hard memories |
 | `mem_profile` | Fetch the latest user profile |
 | `mem_health` | Check Worker connectivity and drain offline cache |

@@ -3,6 +3,7 @@ import {
   listAllUsers,
   listRawByDate,
   countRawByDate,
+  listWorkspaceCountsByDate,
   upsertDailySummary,
   listRecentSummaries,
   upsertProfile,
@@ -16,6 +17,9 @@ import {
   setDistillState,
   maxRawIdByDate,
   insertHard,
+  insertWorkspaceMemory,
+  upsertFocus,
+  pruneFocusOlderThan,
   listHard,
   setHardStatus,
   updateHardContent,
@@ -95,6 +99,14 @@ export async function runDailySummary(): Promise<void> {
       log('error', `summary failed`, { user_id, date, error: String(e) });
     }
   }
+
+  // Focus is a rolling window: drop topics not seen in two weeks.
+  try {
+    const pruned = pruneFocusOlderThan(14);
+    if (pruned > 0) log('info', `focus pruned`, { removed: pruned });
+  } catch (e) {
+    log('warn', `focus prune failed`, { error: String(e) });
+  }
 }
 
 /**
@@ -135,6 +147,9 @@ export async function runDailySummaryForUser(user_id: string, date: string = yes
         raw_count: result.raw_count,
         generated_at: new Date().toISOString(),
       });
+      // Daily topics double as "recent focus" signals. Attribute them to the
+      // workspace that dominated the day; a mixed day produces global topics.
+      recordFocusFromSummary(user_id, date, result.content);
       log('info', `summary ok`, { user_id, date, raw_count: result.raw_count });
     }
 
@@ -177,38 +192,102 @@ async function distillAtomsForUser(user_id: string, date: string, raws: RawConve
 
   // Map the 8-char session prefixes the LLM reports back to full session ids.
   const prefixMap = new Map<string, string>();
+  // session -> workspace, so workspace-scoped atoms land in the right bucket.
+  const workspaceBySession = new Map<string, string>();
   for (const r of fresh) {
-    prefixMap.set(r.session_id.slice(0, 8), r.session_id);
+    const prefix = r.session_id.slice(0, 8);
+    prefixMap.set(prefix, r.session_id);
+    if (r.workspace) workspaceBySession.set(r.session_id, r.workspace);
   }
 
   let inserted = 0;
+  let insertedWorkspace = 0;
   for (const atom of atoms) {
     const key = atom.title.trim().toLowerCase();
     if (known.has(key)) continue; // cross-day dup or intra-batch dup
     known.add(key);
-    insertHard({
-      user_id,
-      type: atom.type,
-      title: atom.title,
-      content: atom.content,
-      facts: atom.facts,
-      concepts: atom.concepts,
-      source: 'auto',
-      priority: 'medium',
-      session_id: atom.session ? prefixMap.get(atom.session) ?? null : null,
-      source_date: date,
-      timestamp: new Date().toISOString(),
-    });
-    inserted++;
+
+    const sessionId = atom.session ? prefixMap.get(atom.session) ?? null : null;
+    const workspace = sessionId ? workspaceBySession.get(sessionId) ?? null : null;
+
+    // Workspace-scoped atoms need a known workspace; without one they fall
+    // back to the global store so the knowledge is never silently dropped.
+    if (atom.scope === 'workspace' && workspace) {
+      insertWorkspaceMemory({
+        user_id,
+        workspace,
+        type: atom.type,
+        title: atom.title,
+        content: atom.content,
+        facts: atom.facts,
+        concepts: atom.concepts,
+        source: 'auto',
+        session_id: sessionId,
+        source_date: date,
+        timestamp: new Date().toISOString(),
+      });
+      insertedWorkspace++;
+    } else {
+      insertHard({
+        user_id,
+        type: atom.type,
+        title: atom.title,
+        content: atom.content,
+        facts: atom.facts,
+        concepts: atom.concepts,
+        source: 'auto',
+        priority: 'medium',
+        session_id: sessionId,
+        source_date: date,
+        timestamp: new Date().toISOString(),
+      });
+      inserted++;
+    }
   }
 
   // Advance the watermark even when zero atoms were extracted — those raws
   // have been considered; re-running must not pay for another LLM call.
   setDistillState(user_id, date, Math.max(maxId, lastId));
-  if (inserted > 0 || atoms.length > 0) {
-    log('info', `atoms distilled`, { user_id, date, extracted: atoms.length, inserted, raws: fresh.length });
+  if (inserted > 0 || insertedWorkspace > 0 || atoms.length > 0) {
+    log('info', `atoms distilled`, {
+      user_id, date, extracted: atoms.length, inserted_global: inserted,
+      inserted_workspace: insertedWorkspace, raws: fresh.length,
+    });
   }
-  return inserted;
+  return inserted + insertedWorkspace;
+}
+
+/**
+ * Turn a daily summary's `topics` into recent-focus entries.
+ * Topics belong to the workspace that dominated the day (>60% of raws);
+ * mixed days contribute global topics instead of mis-attributing them.
+ */
+function recordFocusFromSummary(user_id: string, date: string, summaryContent: string): void {
+  let topics: string[] = [];
+  try {
+    const parsed = JSON.parse(summaryContent);
+    if (Array.isArray(parsed?.topics)) {
+      topics = parsed.topics.filter((t: any) => typeof t === 'string' && t.trim()).slice(0, 7);
+    }
+  } catch {
+    return; // free-form summary — no structured topics to harvest
+  }
+  if (topics.length === 0) return;
+
+  const counts = listWorkspaceCountsByDate(user_id, date).filter(c => c.workspace);
+  const total = counts.reduce((a, c) => a + c.count, 0);
+  const top = counts[0];
+  const workspace = top && total > 0 && top.count / total >= 0.6 ? top.workspace : null;
+
+  for (const topic of topics) {
+    upsertFocus({
+      user_id,
+      workspace,
+      topic: topic.slice(0, 200),
+      detail: '',
+      date,
+    });
+  }
 }
 
 /**

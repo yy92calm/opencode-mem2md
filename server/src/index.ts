@@ -11,6 +11,7 @@ import { rawRoutes } from './routes/raw.js';
 import { memoryRoutes } from './routes/memory.js';
 import { profileRoutes } from './routes/profile.js';
 import { skillRoutes } from './routes/skills.js';
+import { workspaceRoutes } from './routes/workspace.js';
 
 function log(level: string, msg: string, extra?: object) {
   console.log(JSON.stringify({ ts: new Date().toISOString(), level, scope: 'boot', msg, ...(extra || {}) }));
@@ -119,6 +120,7 @@ function bootstrap() {
   app.route('/api/memory', memoryRoutes);
   app.route('/api/profile', profileRoutes);
   app.route('/api/skills', skillRoutes);
+  app.route('/api/workspace', workspaceRoutes);
 
   app.get('/api/whoami', (c) => c.json({ user_id: c.get('user_id') }));
 

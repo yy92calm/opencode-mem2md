@@ -21,6 +21,65 @@ import type { HardMemory } from './types/index.js';
 
 const SERVICE = 'opencode-mem';
 
+/** Format a workspace path for display: last two segments, home collapsed. */
+function shortWorkspace(workspace: string): string {
+  const home = homedir();
+  const rel = workspace.startsWith(home) ? `~${workspace.slice(home.length)}` : workspace;
+  const parts = rel.split('/').filter(Boolean);
+  return parts.length <= 2 ? rel : `…/${parts.slice(-2).join('/')}`;
+}
+
+/** Cut a section to a char budget on a line boundary. */
+function clampSection(text: string, budget: number): string {
+  if (text.length <= budget) return text;
+  const cut = text.slice(0, budget);
+  const lastNewline = cut.lastIndexOf('\n');
+  const body = lastNewline > budget * 0.6 ? cut.slice(0, lastNewline) : cut;
+  return `${body}\n(truncated)`;
+}
+
+interface MemoryLike {
+  type: string;
+  title: string;
+  content: string;
+  source?: string;
+  priority?: string;
+  timestamp?: string;
+  workspace?: string;
+}
+
+/**
+ * Rank memories for injection: manual > auto-promoted > auto, then priority,
+ * then recency. Workspace hits are already local, so they skip the source rank.
+ */
+function rankMemories<T extends MemoryLike>(memories: T[]): T[] {
+  const sourceRank: Record<string, number> = { manual: 0, 'auto-promoted': 1, auto: 2 };
+  const priorityRank: Record<string, number> = { high: 0, medium: 1, low: 2 };
+  return [...memories].sort(
+    (a, b) =>
+      (sourceRank[a.source ?? 'manual'] ?? 0) - (sourceRank[b.source ?? 'manual'] ?? 0) ||
+      (priorityRank[a.priority ?? 'high'] ?? 0) - (priorityRank[b.priority ?? 'high'] ?? 0) ||
+      (b.timestamp || '').localeCompare(a.timestamp || ''),
+  );
+}
+
+/** Build a budgeted bullet list, reporting how many items were omitted. */
+function memorySection(memories: MemoryLike[], budget: number): { text: string; omitted: number } {
+  const lines: string[] = [];
+  let used = 0;
+  let omitted = 0;
+  for (const memory of memories) {
+    const line = `- [${memory.type}] ${memory.title}: ${memory.content.slice(0, 300)}`;
+    if (used + line.length > budget) {
+      omitted++;
+      continue;
+    }
+    lines.push(line);
+    used += line.length;
+  }
+  return { text: lines.join('\n'), omitted };
+}
+
 export default Plugin.define({
   id: 'opencode-mem',
 
@@ -35,6 +94,9 @@ export default Plugin.define({
     }
 
     const cfg = fillDefaults(rawCfg);
+    // OpenCode binds a plugin instance to a directory; that is the workspace
+    // identity used to isolate project-scoped memories.
+    const workspace = ctx.location.directory;
     const worker = new WorkerClient(cfg, (level, msg, extra) => {
       switch (level) {
         case 'debug':
@@ -91,6 +153,11 @@ export default Plugin.define({
               description: 'Related concept tags',
             },
             priority: { type: 'string', enum: ['high', 'medium', 'low'], description: 'Defaults to high' },
+            scope: {
+              type: 'string',
+              enum: ['global', 'workspace'],
+              description: 'global = applies everywhere (default); workspace = only this directory/project',
+            },
           },
           required: ['type', 'title', 'content'],
           additionalProperties: false,
@@ -103,6 +170,7 @@ export default Plugin.define({
             facts?: string[];
             concepts?: string[];
             priority?: 'high' | 'medium' | 'low';
+            scope?: 'global' | 'workspace';
           };
           const memory: HardMemory = {
             type: args.type,
@@ -115,37 +183,76 @@ export default Plugin.define({
             session_id: context.sessionID,
             timestamp: new Date().toISOString(),
           };
-          const result = await worker.sendHardMemory(memory);
+          const scope = args.scope ?? 'global';
+          const scopeLabel = scope === 'workspace' ? ` (workspace: ${shortWorkspace(workspace)})` : '';
+          const result = await worker.sendHardMemory(memory, {
+            scope,
+            workspace: scope === 'workspace' ? workspace : null,
+          });
           return {
             content: result
-              ? `✓ Remembered: ${args.title} (id=${result.id})`
-              : `⚠ Cached offline (worker unreachable): ${args.title}`,
+              ? `✓ Remembered${scopeLabel}: ${args.title} (id=${result.id})`
+              : `⚠ Cached offline${scopeLabel} (worker unreachable): ${args.title}`,
           };
         },
       });
 
       editor.add({
         name: 'mem_search',
-        description: 'Search hard memories by keyword (full-text)',
+        description: 'Search memories by keyword. scope=all (default) searches global + current workspace; workspace searches only this directory.',
         input: {
           type: 'object',
           properties: {
             query: { type: 'string', description: 'Search query' },
             limit: { type: 'number', description: 'Max results (default 50)' },
+            scope: { type: 'string', enum: ['all', 'global', 'workspace'], description: 'Search scope (default all)' },
           },
           required: ['query'],
           additionalProperties: false,
         },
         execute: async (input) => {
-          const args = input as { query: string; limit?: number };
-          const items = await worker.searchMemories(args.query, args.limit ?? 50);
+          const args = input as { query: string; limit?: number; scope?: 'all' | 'global' | 'workspace' };
+          const scope = args.scope ?? 'all';
+          const items = await worker.searchMemories(args.query, args.limit ?? 50, {
+            scope,
+            workspace: scope === 'global' ? null : workspace,
+          });
+          if (items.length === 0) return { content: `No memories matched "${args.query}".` };
           return {
-            content:
-              items.length === 0
-                ? `No memories matched "${args.query}".`
-                : items
-                    .map((memory) => `- [${memory.type}] ${memory.title}\n  ${memory.content.slice(0, 200)}`)
-                    .join('\n'),
+            content: items
+              .map((memory) => {
+                const tag = memory.workspace ? ` [ws:${shortWorkspace(memory.workspace)}]` : '';
+                return `- [${memory.type}]${tag} ${memory.title}\n  ${memory.content.slice(0, 200)}`;
+              })
+              .join('\n'),
+          };
+        },
+      });
+
+      editor.add({
+        name: 'mem_focus',
+        description: 'Show what you have been focusing on recently (rolling topic window), optionally for this workspace only',
+        input: {
+          type: 'object',
+          properties: {
+            days: { type: 'number', description: 'Lookback window in days (default 7)' },
+            limit: { type: 'number', description: 'Max topics (default 10)' },
+            all_workspaces: { type: 'boolean', description: 'Include topics from other workspaces (default false)' },
+          },
+          additionalProperties: false,
+        },
+        execute: async (input) => {
+          const args = input as { days?: number; limit?: number; all_workspaces?: boolean };
+          const ws = args.all_workspaces ? null : workspace;
+          const items = await worker.listFocus(ws, args.days ?? 7, args.limit ?? 10);
+          if (items.length === 0) return { content: 'No recent focus topics yet.' };
+          return {
+            content: items
+              .map((f) => {
+                const where = f.workspace ? ` (${shortWorkspace(f.workspace)})` : ' (global)';
+                return `- ${f.topic}${where} — last seen ${f.last_seen}${f.weight > 1 ? `, ×${Math.round(f.weight)}` : ''}`;
+              })
+              .join('\n'),
           };
         },
       });
@@ -274,6 +381,7 @@ export default Plugin.define({
       if (isTrivial(toolName, event.input, toolResult)) return;
       worker.enqueueRaw({
         session_id: event.sessionID || 'unknown',
+        workspace,
         role: 'tool',
         content: '',
         tool_name: toolName,
@@ -290,57 +398,74 @@ export default Plugin.define({
       if (!text) return;
       worker.enqueueRaw({
         session_id: event.sessionID,
+        workspace,
         role: 'user',
         content: text,
         timestamp: new Date().toISOString(),
       });
     });
 
-    // --- Inject profile + memories into the system prompt ---
+    // --- Inject four layers into the system prompt ---
     // (V1: experimental.chat.system.transform; V2: session "context" hook.)
-    // Memories are budgeted, not bulk-injected: ranked by source (manual first)
-    // then priority then recency, cut when the char budget is exhausted.
-    // The rest stays reachable on-demand via mem_search.
+    //
+    // Order matters: workspace memory is the most specific and goes first,
+    // then global hard memories, then the rolling focus window, then profile.
+    // Each layer has its own char budget so one large layer cannot starve the
+    // others; anything omitted is still reachable via mem_search.
     await ctx.session.hook('context', async (event) => {
       // Hot path: never let Worker unavailability break a model request.
-      let profile: string | null = null;
-      let memories: HardMemory[] = [];
+      let bundle = null as Awaited<ReturnType<typeof worker.getContextBundle>>;
       try {
-        [profile, memories] = await Promise.all([worker.getProfile(), worker.listMemories(50)]);
+        bundle = await worker.getContextBundle(workspace, cfg.focus_days);
       } catch (error) {
         logger.debug(SERVICE, 'context injection fetch failed, skipping', { error: String(error) });
       }
-      const parts: string[] = [];
-      if (profile) {
-        parts.push(`\n\n## User Profile (auto-maintained)\n\n${profile}`);
-      }
-      if (memories.length > 0) {
-        const sourceRank = { manual: 0, 'auto-promoted': 1, auto: 2 } as Record<string, number>;
-        const priorityRank = { high: 0, medium: 1, low: 2 } as Record<string, number>;
-        const ranked = [...memories].sort(
-          (a, b) =>
-            (sourceRank[a.source ?? 'manual'] ?? 0) - (sourceRank[b.source ?? 'manual'] ?? 0) ||
-            (priorityRank[a.priority ?? 'high'] ?? 0) - (priorityRank[b.priority ?? 'high'] ?? 0) ||
-            (b.timestamp || '').localeCompare(a.timestamp || ''),
-        );
 
+      const parts: string[] = [];
+
+      // 1. Workspace memories (this directory only)
+      if (bundle?.workspace_memories?.length) {
+        const { text, omitted } = memorySection(rankMemories(bundle.workspace_memories), cfg.workspace_char_budget);
+        if (text) {
+          const hint = omitted > 0 ? `\n(${omitted} more workspace memories omitted — use mem_search scope=workspace)` : '';
+          parts.push(
+            `\n\n## Workspace Memory (${shortWorkspace(workspace)})\n\n${clampSection(text, cfg.workspace_char_budget)}${hint}`,
+          );
+        }
+      }
+
+      // 2. Global hard memories (user-asserted + auto-distilled)
+      if (bundle?.hard_memories?.length) {
+        const { text, omitted } = memorySection(rankMemories(bundle.hard_memories), cfg.hard_char_budget);
+        if (text) {
+          const hint = omitted > 0 ? `\n(${omitted} more memories omitted — use mem_search to recall them)` : '';
+          parts.push(
+            `\n\n## Hard Memories (user-asserted + auto-distilled)\n\n${clampSection(text, cfg.hard_char_budget)}${hint}`,
+          );
+        }
+      }
+
+      // 3. Recent focus (rolling window)
+      if (bundle?.focus?.length) {
         const lines: string[] = [];
         let used = 0;
-        let omitted = 0;
-        for (const memory of ranked) {
-          const line = `- [${memory.type}] ${memory.title}: ${memory.content.slice(0, 300)}`;
-          if (used + line.length > cfg.inject_char_budget) {
-            omitted++;
-            continue;
-          }
+        for (const f of bundle.focus) {
+          const line = `- ${f.topic}${f.workspace ? ` (${shortWorkspace(f.workspace)})` : ''}`;
+          if (used + line.length > cfg.focus_char_budget) break;
           lines.push(line);
           used += line.length;
         }
         if (lines.length > 0) {
-          const hint = omitted > 0 ? `\n(${omitted} more memories omitted — use mem_search to recall them)` : '';
-          parts.push(`\n\n## Hard Memories (user-asserted + auto-distilled)\n\n${lines.join('\n')}${hint}`);
+          parts.push(`\n\n## Recent Focus (last ${cfg.focus_days}d)\n\n${lines.join('\n')}`);
         }
       }
+
+      // 4. Profile
+      const profile = bundle?.profile ?? worker.getCachedProfile();
+      if (profile) {
+        parts.push(`\n\n## User Profile (auto-maintained)\n\n${clampSection(profile, cfg.profile_char_budget)}`);
+      }
+
       if (parts.length > 0) {
         event.system.push({ type: 'text', text: parts.join('\n') });
       }

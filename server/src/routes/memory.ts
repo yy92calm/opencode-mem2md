@@ -1,5 +1,17 @@
 import { Hono } from 'hono';
-import { insertHard, listHard, searchHard, searchSummaries, deleteHard, setHardStatus, touchHardUsage, getStats } from '../db/repo.js';
+import {
+  insertHard,
+  insertWorkspaceMemory,
+  listHard,
+  searchHard,
+  searchWorkspaceMemories,
+  searchSummaries,
+  deleteHard,
+  setHardStatus,
+  touchHardUsage,
+  touchWorkspaceUsage,
+  getStats,
+} from '../db/repo.js';
 import { maybeTriggerProfileRefresh } from '../cron/jobs.js';
 import { hardMemorySchema, memoryStatusSchema, safeParse } from '../validation.js';
 
@@ -28,6 +40,26 @@ memoryRoutes.post('/', async (c) => {
   if (!parsed.ok) return c.json({ error: parsed.error }, 400);
 
   const m = parsed.data;
+
+  // Workspace-scoped writes go to workspace_memories; the global hard-memory
+  // store stays user-level so user-asserted facts still apply everywhere.
+  if (m.scope === 'workspace') {
+    if (!m.workspace) return c.json({ error: 'workspace is required when scope=workspace' }, 400);
+    const id = insertWorkspaceMemory({
+      user_id,
+      workspace: m.workspace,
+      type: m.type,
+      title: m.title,
+      content: m.content,
+      facts: m.facts,
+      concepts: m.concepts,
+      source: m.source,
+      session_id: m.session_id ?? null,
+      timestamp: m.timestamp,
+    });
+    return c.json({ id, scope: 'workspace', workspace: m.workspace });
+  }
+
   const id = insertHard({
     user_id,
     type: m.type,
@@ -59,13 +91,16 @@ memoryRoutes.get('/', (c) => {
 });
 
 /**
- * GET /api/memory/search?q=...&limit=50&char_budget=8000&min_results=3
+ * GET /api/memory/search?q=...&limit=50&char_budget=8000&min_results=3&scope=all|global|workspace&workspace=...
  *
  * Budgeted two-tier retrieval (mirrors layered-memory designs):
  *  1. hard memories by FTS rank, cut when the char budget is exhausted;
  *  2. if fewer than min_results matched, fall back to daily summaries with
  *     the remaining budget (returned as pseudo-memories, source='summary').
  * Usage counters of served hard memories are bumped async.
+ *
+ * `scope=workspace` searches only the given workspace; `all` (default) merges
+ * workspace + global results.
  */
 memoryRoutes.get('/search', (c) => {
   const user_id = c.get('user_id');
@@ -73,8 +108,20 @@ memoryRoutes.get('/search', (c) => {
   const limit = Math.min(Math.max(parseInt(c.req.query('limit') || '50') || 50, 1), 200);
   const charBudget = Math.min(Math.max(parseInt(c.req.query('char_budget') || '8000') || 8000, 500), 100000);
   const minResults = Math.min(Math.max(parseInt(c.req.query('min_results') || '3') || 3, 0), 50);
+  const scope = c.req.query('scope') === 'workspace' ? 'workspace' : c.req.query('scope') === 'global' ? 'global' : 'all';
+  const workspace = (c.req.query('workspace') || '').trim();
 
-  const all = searchHard(user_id, q, limit);
+  if (scope === 'workspace' && !workspace) {
+    return c.json({ error: 'workspace is required when scope=workspace' }, 400);
+  }
+
+  const hard = scope === 'workspace' ? [] : searchHard(user_id, q, limit);
+  const wsHits = scope === 'global' || !workspace ? [] : searchWorkspaceMemories(user_id, workspace, q, limit);
+
+  // Merge both layers by recency; workspace hits get a small rank bonus so
+  // local context wins ties against global facts.
+  const all = [...wsHits.map(m => ({ ...m, _ws: true })), ...hard.map(m => ({ ...m, _ws: false }))]
+    .sort((a, b) => (a._ws === b._ws ? 0 : a._ws ? -1 : 1) || (b.timestamp || '').localeCompare(a.timestamp || ''));
 
   // First tier: fill up to the char budget in rank order.
   const items: any[] = [];
@@ -86,7 +133,8 @@ memoryRoutes.get('/search', (c) => {
       truncated = true;
       break;
     }
-    items.push(m);
+    const { _ws, ...rest } = m as any;
+    items.push(rest);
     used += size;
   }
 
@@ -123,10 +171,21 @@ memoryRoutes.get('/search', (c) => {
     }
   }
 
-  // Usage accounting for served hard memories (fire-and-forget).
-  const hardIds = items.map(m => m.id).filter((id): id is number => typeof id === 'number');
+  // Usage accounting for served memories (fire-and-forget). Workspace hits
+  // must not bump hard_memories counters, so track them separately.
+  const hardIds = items
+    .filter(m => !m.workspace)
+    .map(m => m.id)
+    .filter((id): id is number => typeof id === 'number');
+  const wsIds = items
+    .filter(m => m.workspace)
+    .map(m => m.id)
+    .filter((id): id is number => typeof id === 'number');
   if (hardIds.length > 0) {
     Promise.resolve().then(() => touchHardUsage(hardIds)).catch(() => {});
+  }
+  if (wsIds.length > 0) {
+    Promise.resolve().then(() => touchWorkspaceUsage(wsIds)).catch(() => {});
   }
 
   return c.json({ items, truncated });

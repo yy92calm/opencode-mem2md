@@ -9,7 +9,7 @@ import {
   unlinkSync,
 } from 'fs';
 import { dirname } from 'path';
-import type { RawConversation, HardMemory, MemPluginConfig, SkillDraft } from '../types/index.js';
+import type { RawConversation, HardMemory, RecentFocus, ContextBundle, MemPluginConfig, SkillDraft } from '../types/index.js';
 
 /**
  * Worker HTTP client with:
@@ -47,6 +47,7 @@ export class WorkerClient {
   // In-memory caches to avoid hitting the Worker on every chat turn.
   private profileCache: { value: string; at: number } | null = null;
   private memoriesCache: { value: HardMemory[]; at: number } | null = null;
+  private contextCache: { value: ContextBundle; at: number; workspace: string | null } | null = null;
 
   constructor(
     private cfg: Required<MemPluginConfig>,
@@ -135,19 +136,63 @@ export class WorkerClient {
   }
 
   /** Send a hard memory immediately (no batching — these are rare and high-value). */
-  async sendHardMemory(m: HardMemory): Promise<{ id: number } | null> {
+  async sendHardMemory(
+    m: HardMemory,
+    opts: { scope?: 'global' | 'workspace'; workspace?: string | null } = {},
+  ): Promise<{ id: number } | null> {
+    const payload = {
+      ...m,
+      scope: opts.scope ?? 'global',
+      workspace: opts.workspace ?? null,
+    };
     try {
-      const result = await this.post<{ id: number }>('/api/memory', m);
+      const result = await this.post<{ id: number }>('/api/memory', payload);
       this.healthy = true;
-      // New memory changes the list — invalidate the memories cache.
+      // New memory changes the list — invalidate the memories/context cache.
       this.memoriesCache = null;
+      this.contextCache = null;
       return result;
     } catch (e) {
       this.log('warn', 'hard memory send failed, caching offline', { title: m.title, error: String(e) });
-      this.appendOfflineCache([{ kind: 'memory', payload: m }]);
+      this.appendOfflineCache([{ kind: 'memory', payload }]);
       this.healthy = false;
       return null;
     }
+  }
+
+  /**
+   * One round-trip for per-turn injection: profile + workspace memories +
+   * global hard memories + recent focus. Cached for memories_cache_ttl_ms
+   * (keyed by workspace so a directory switch never serves stale context).
+   */
+  async getContextBundle(workspace: string | null, days = 7): Promise<ContextBundle | null> {
+    const ttl = this.cfg.memories_cache_ttl_ms;
+    if (ttl > 0 && this.contextCache && this.contextCache.workspace === workspace && Date.now() - this.contextCache.at < ttl) {
+      return this.contextCache.value;
+    }
+    try {
+      const qs = new URLSearchParams();
+      if (workspace) qs.set('workspace', workspace);
+      qs.set('days', String(days));
+      const bundle = await this.get<ContextBundle>(`/api/workspace/context?${qs.toString()}`, this.cfg.profile_fetch_timeout_ms);
+      if (bundle) {
+        this.contextCache = { value: bundle, at: Date.now(), workspace };
+        // Keep the legacy profile cache warm for offline fallback.
+        if (bundle.profile) {
+          this.writeProfileCache(bundle.profile);
+          this.profileCache = { value: bundle.profile, at: Date.now() };
+        }
+        return bundle;
+      }
+    } catch (e) {
+      this.log('debug', 'context bundle fetch failed', { error: String(e) });
+    }
+    return null;
+  }
+
+  /** Local fallback when the Worker is unreachable: profile only. */
+  getCachedProfile(): string | null {
+    return this.readProfileCache();
   }
 
   async getProfile(): Promise<string | null> {
@@ -196,10 +241,30 @@ export class WorkerClient {
     }
   }
 
-  async searchMemories(query: string, limit = 50): Promise<HardMemory[]> {
-    const result = await this.get<{ items: HardMemory[] }>(
-      `/api/memory/search?q=${encodeURIComponent(query)}&limit=${limit}`,
-    );
+  async searchMemories(
+    query: string,
+    limit = 50,
+    opts: { scope?: 'all' | 'global' | 'workspace'; workspace?: string | null } = {},
+  ): Promise<HardMemory[]> {
+    const qs = new URLSearchParams({ q: query, limit: String(limit) });
+    if (opts.scope && opts.scope !== 'all') qs.set('scope', opts.scope);
+    if (opts.workspace) qs.set('workspace', opts.workspace);
+    const result = await this.get<{ items: HardMemory[] }>(`/api/memory/search?${qs.toString()}`);
+    return result?.items ?? [];
+  }
+
+  /** Recent focus topics for a workspace (null → all workspaces). */
+  async listFocus(workspace: string | null, days = 7, limit = 8): Promise<RecentFocus[]> {
+    const qs = new URLSearchParams({ days: String(days), limit: String(limit) });
+    if (workspace) qs.set('workspace', workspace);
+    const result = await this.get<{ items: RecentFocus[] }>(`/api/workspace/focus?${qs.toString()}`);
+    return result?.items ?? [];
+  }
+
+  /** Workspace-scoped memories for one directory. */
+  async listWorkspaceMemories(workspace: string, limit = 50): Promise<HardMemory[]> {
+    const qs = new URLSearchParams({ workspace, limit: String(limit) });
+    const result = await this.get<{ items: HardMemory[] }>(`/api/workspace/memory?${qs.toString()}`);
     return result?.items ?? [];
   }
 

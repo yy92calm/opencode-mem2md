@@ -1,6 +1,6 @@
 ---
 name: mem_capture
-description: Persist a hard memory to the centralized opencode-mem-worker
+description: Persist a hard or workspace-scoped memory to the centralized opencode-mem-worker
 ---
 
 # mem_capture Skill
@@ -15,23 +15,36 @@ store a fact, preference, decision, or rule that should survive across sessions.
 - An error has a known fix worth preserving
 - An explicit decision is made (e.g. "we use Postgres, not MySQL")
 
+## Where it goes (scope)
+
+| scope | Store | Injected |
+|---|---|---|
+| `global` (default) | `hard_memories` | every workspace |
+| `workspace` | `workspace_memories` | only the current directory |
+
+Use `scope: workspace` for facts that only hold for this repo/project:
+scripts, ports, file layout, deployment target, local conventions, repo quirks.
+Use `global` for personal preferences, machine setup, and cross-project rules.
+
 ## How to call
 
 ```yaml
 tool: mem_capture
 args:
-  type: preference | config | decision | error | discovery | fact
+  type: preference | config | decision | error | discovery | fact | constraint | pattern
   title: short semantic title (not "Read: file.ts")
   content: 1-3 sentence explanation
   facts: [2-5 short bullet strings]
   concepts: [tag1, tag2]
   priority: high | medium | low
+  scope: global | workspace      # default global
 ```
 
-The Worker stores it in `hard_memories` (permanent, FTS5-searchable) and
-incorporates it into the next user profile regeneration.
+Workspace memories are keyed by absolute path, so the same title in another
+project does not collide. Re-asserting an existing title refreshes it instead
+of duplicating.
 
 ## Notes
 
-- All hard memories belong to the authenticated user (`user_id` derived from API key).
-- Returns the memory id, or a warning if cached offline.
+- All memories belong to the authenticated user (`user_id` derived from API key).
+- Returns the memory id (and scope), or a warning if cached offline.

@@ -1,6 +1,6 @@
 ---
 name: mem_search
-description: Search the user's hard memories on the Worker via full-text query
+description: Search global and workspace memories on the Worker via full-text query
 ---
 
 # mem_search Skill
@@ -21,9 +21,17 @@ tool: mem_search
 args:
   query: free-form text (matched via SQLite FTS5)
   limit: number of results (default 50)
+  scope: all | global | workspace   # default all
 ```
+
+`all` merges workspace memories (current directory) with global hard memories,
+workspace hits first. `workspace` restricts to this project; `global` ignores
+project-local facts.
 
 ## Notes
 
-- Only searches `hard_memories` (user-asserted), not raw conversations.
-- For broader context, use `mem_profile` to see the synthesized user profile.
+- Searches `hard_memories` + the current workspace's `workspace_memories`,
+  falling back to daily summaries when results are sparse.
+- Workspace hits are tagged `[ws:…]` in the output.
+- For broader context, use `mem_profile` for the synthesized profile and
+  `mem_focus` for recent topics.

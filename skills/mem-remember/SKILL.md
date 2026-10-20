@@ -33,8 +33,11 @@ the structured fields themselves.
 4. Extract a short semantic `title` (≤ 30 chars).
 5. Pull 2-5 concrete `facts` (verbatim phrases from the user).
 6. Tag 1-3 `concepts`.
-7. Call `mem_capture` with `priority: high` (user-asserted = important).
-8. Briefly confirm to the user what was saved.
+7. Choose `scope`:
+   - project/repo-specific (scripts, ports, layout, local conventions, "this project") → `workspace`
+   - personal preference / machine setup / cross-project rule → `global`
+8. Call `mem_capture` with `priority: high` (user-asserted = important).
+9. Briefly confirm to the user what was saved (and where, if workspace-scoped).
 
 ## Example
 
@@ -51,6 +54,7 @@ args:
     - 不要使用 npm
   concepts: [build, bun, tooling]
   priority: high
+  scope: workspace
 ```
 
 Reply: "✓ 已记住：项目用 Bun，不用 npm"

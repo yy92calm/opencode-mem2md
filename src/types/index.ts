@@ -5,6 +5,8 @@
 
 export interface RawConversation {
   session_id: string;
+  /** Absolute directory of the OpenCode session (workspace isolation). */
+  workspace?: string | null;
   role: 'user' | 'assistant' | 'tool';
   content: string;
   tool_name?: string;
@@ -15,6 +17,8 @@ export interface RawConversation {
 
 export interface HardMemory {
   id?: number;
+  /** Present only on workspace-scoped memories returned by merged search. */
+  workspace?: string;
   type: 'preference' | 'config' | 'decision' | 'error' | 'discovery' | 'fact' | 'constraint' | 'pattern';
   title: string;
   content: string;
@@ -29,6 +33,26 @@ export interface HardMemory {
   source_date?: string | null;
   session_id?: string;
   timestamp: string;
+}
+
+/** Rolling topic the user is currently working on. */
+export interface RecentFocus {
+  id?: number;
+  user_id?: string;
+  workspace: string | null;
+  topic: string;
+  detail: string;
+  weight: number;
+  last_seen: string;
+}
+
+/** One round-trip payload for the four-layer system-prompt injection. */
+export interface ContextBundle {
+  workspace: string | null;
+  profile: string | null;
+  workspace_memories: HardMemory[];
+  hard_memories: HardMemory[];
+  focus: RecentFocus[];
 }
 
 export interface SkillDraft {
@@ -68,6 +92,19 @@ export interface MemPluginConfig {
   profile_cache_ttl_ms?: number;
   /** In-memory hard-memories cache TTL ms (default 30000 = 30s). 0 disables. */
   memories_cache_ttl_ms?: number;
-  /** Char budget for the memories section injected into each turn (default 6000). */
+  /** Recent-focus lookback window in days (default 7). */
+  focus_days?: number;
+  /** Max chars for the injected profile section (default 1500). */
+  profile_char_budget?: number;
+  /** Max chars for the injected workspace-memory section (default 1600). */
+  workspace_char_budget?: number;
+  /** Max chars for the injected global hard-memory section (default 2000). */
+  hard_char_budget?: number;
+  /** Max chars for the injected recent-focus section (default 600). */
+  focus_char_budget?: number;
+  /**
+   * Legacy total budget. When set it is split across the four layers using
+   * the ratios above; per-layer values win when explicitly provided.
+   */
   inject_char_budget?: number;
 }

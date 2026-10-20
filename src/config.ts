@@ -34,6 +34,9 @@ export function loadConfig(directory: string): MemPluginConfig | null {
 }
 
 export function fillDefaults(cfg: MemPluginConfig): Required<MemPluginConfig> {
+  const total = cfg.inject_char_budget ?? 6000;
+  // Split the legacy total budget across layers when per-layer values are absent:
+  // profile 25%, workspace 27%, hard 33%, focus 10% (≈ 1500/1600/2000/600).
   return {
     server_url: cfg.server_url.replace(/\/$/, ''),
     api_key: cfg.api_key,
@@ -48,6 +51,11 @@ export function fillDefaults(cfg: MemPluginConfig): Required<MemPluginConfig> {
     profile_cache_path: cfg.profile_cache_path ?? DEFAULT_PROFILE_CACHE,
     profile_cache_ttl_ms: cfg.profile_cache_ttl_ms ?? 60_000,
     memories_cache_ttl_ms: cfg.memories_cache_ttl_ms ?? 30_000,
-    inject_char_budget: cfg.inject_char_budget ?? 6000,
+    focus_days: cfg.focus_days ?? 7,
+    inject_char_budget: total,
+    profile_char_budget: cfg.profile_char_budget ?? Math.round(total * 0.25),
+    workspace_char_budget: cfg.workspace_char_budget ?? Math.round(total * 0.27),
+    hard_char_budget: cfg.hard_char_budget ?? Math.round(total * 0.33),
+    focus_char_budget: cfg.focus_char_budget ?? Math.round(total * 0.1),
   };
 }

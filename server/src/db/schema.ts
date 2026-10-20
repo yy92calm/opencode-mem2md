@@ -53,6 +53,15 @@ function migrate(database: Database.Database): void {
   if (!hardColNames.has('last_used_at')) addCol(`ALTER TABLE hard_memories ADD COLUMN last_used_at TEXT`);
   if (!hardColNames.has('source_date')) addCol(`ALTER TABLE hard_memories ADD COLUMN source_date TEXT`);
 
+  // Workspace dimension on raw conversations (legacy DBs predate it).
+  const rawCols = database.prepare(`PRAGMA table_info(raw_conversations)`).all() as { name: string }[];
+  if (!rawCols.some(c => c.name === 'workspace')) {
+    addCol(`ALTER TABLE raw_conversations ADD COLUMN workspace TEXT`);
+  }
+  try {
+    database.exec(`CREATE INDEX IF NOT EXISTS idx_raw_user_workspace_ts ON raw_conversations(user_id, workspace, timestamp DESC)`);
+  } catch { /* index may already exist — ignore */ }
+
   // Backfill daily_summaries_fts for legacy rows (trigger-synced from here on).
   const ftsCount = database.prepare(`SELECT COUNT(*) as c FROM daily_summaries_fts`).get() as { c: number };
   const sumCount = database.prepare(`SELECT COUNT(*) as c FROM daily_summaries`).get() as { c: number };
@@ -107,6 +116,7 @@ CREATE TABLE IF NOT EXISTS raw_conversations (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   user_id TEXT NOT NULL,
   session_id TEXT NOT NULL,
+  workspace TEXT,
   role TEXT NOT NULL CHECK (role IN ('user', 'assistant', 'tool')),
   content TEXT NOT NULL DEFAULT '',
   tool_name TEXT,
@@ -119,6 +129,7 @@ CREATE TABLE IF NOT EXISTS raw_conversations (
 CREATE INDEX IF NOT EXISTS idx_raw_user_ts ON raw_conversations(user_id, timestamp DESC);
 CREATE INDEX IF NOT EXISTS idx_raw_session ON raw_conversations(session_id);
 CREATE INDEX IF NOT EXISTS idx_raw_user_date ON raw_conversations(user_id, date(timestamp));
+CREATE INDEX IF NOT EXISTS idx_raw_user_workspace_ts ON raw_conversations(user_id, workspace, timestamp DESC);
 
 -- Hard memories (user-triggered "remember X", high value)
 CREATE TABLE IF NOT EXISTS hard_memories (
@@ -239,6 +250,72 @@ CREATE TABLE IF NOT EXISTS user_profiles (
   source_raw_count INTEGER NOT NULL DEFAULT 0,
   source_memory_count INTEGER NOT NULL DEFAULT 0
 );
+
+-- Workspace memories: durable facts scoped to one directory/project.
+-- Injected only when the session runs in that workspace, keeping
+-- "this repo uses pnpm" out of unrelated projects.
+CREATE TABLE IF NOT EXISTS workspace_memories (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id TEXT NOT NULL,
+  workspace TEXT NOT NULL,
+  type TEXT NOT NULL,
+  title TEXT NOT NULL,
+  content TEXT NOT NULL DEFAULT '',
+  facts TEXT NOT NULL DEFAULT '[]',
+  concepts TEXT NOT NULL DEFAULT '[]',
+  source TEXT NOT NULL DEFAULT 'auto',
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'deprecated')),
+  usage_count INTEGER NOT NULL DEFAULT 0,
+  last_used_at TEXT,
+  source_date TEXT,
+  session_id TEXT,
+  timestamp TEXT NOT NULL,
+  created_at TEXT DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_ws_mem_user_ws ON workspace_memories(user_id, workspace, timestamp DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_ws_mem_dedup ON workspace_memories(user_id, workspace, lower(title));
+
+CREATE VIRTUAL TABLE IF NOT EXISTS workspace_memories_fts USING fts5(
+  title, content, facts, concepts,
+  content='workspace_memories',
+  content_rowid='id',
+  tokenize='trigram'
+);
+
+CREATE TRIGGER IF NOT EXISTS workspace_memories_ai AFTER INSERT ON workspace_memories BEGIN
+  INSERT INTO workspace_memories_fts(rowid, title, content, facts, concepts)
+  VALUES (new.id, new.title, new.content, new.facts, new.concepts);
+END;
+
+CREATE TRIGGER IF NOT EXISTS workspace_memories_ad AFTER DELETE ON workspace_memories BEGIN
+  INSERT INTO workspace_memories_fts(workspace_memories_fts, rowid, title, content, facts, concepts)
+  VALUES ('delete', old.id, old.title, old.content, old.facts, old.concepts);
+END;
+
+CREATE TRIGGER IF NOT EXISTS workspace_memories_au AFTER UPDATE ON workspace_memories BEGIN
+  INSERT INTO workspace_memories_fts(workspace_memories_fts, rowid, title, content, facts, concepts)
+  VALUES ('delete', old.id, old.title, old.content, old.facts, old.concepts);
+  INSERT INTO workspace_memories_fts(rowid, title, content, facts, concepts)
+  VALUES (new.id, new.title, new.content, new.facts, new.concepts);
+END;
+
+-- Recent focus: rolling topics the user is currently working on.
+-- Upserted from daily summaries (topics) and decayed when stale.
+CREATE TABLE IF NOT EXISTS recent_focus (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id TEXT NOT NULL,
+  workspace TEXT,
+  topic TEXT NOT NULL,
+  detail TEXT NOT NULL DEFAULT '',
+  weight REAL NOT NULL DEFAULT 1,
+  last_seen TEXT NOT NULL,
+  created_at TEXT DEFAULT (datetime('now')),
+  UNIQUE(user_id, workspace, topic)
+);
+
+CREATE INDEX IF NOT EXISTS idx_focus_user_seen ON recent_focus(user_id, last_seen DESC);
+CREATE INDEX IF NOT EXISTS idx_focus_user_ws ON recent_focus(user_id, workspace, last_seen DESC);
 
 -- Track when each user last had their profile recomputed (for delta triggers)
 CREATE TABLE IF NOT EXISTS profile_meta (

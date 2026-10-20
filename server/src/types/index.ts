@@ -6,6 +6,8 @@ export interface RawConversation {
   id?: number;
   user_id: string;
   session_id: string;
+  /** Absolute directory the session ran in (OpenCode workspace). Null for legacy rows. */
+  workspace?: string | null;
   role: 'user' | 'assistant' | 'tool';
   content: string;
   tool_name?: string | null;
@@ -14,17 +16,21 @@ export interface RawConversation {
   timestamp: string;
 }
 
+export type MemoryType = 'preference' | 'config' | 'decision' | 'error' | 'discovery' | 'fact' | 'constraint' | 'pattern';
+export type MemorySource = 'manual' | 'auto-promoted' | 'auto';
+export type MemoryPriority = 'high' | 'medium' | 'low';
+
 export interface HardMemory {
   id?: number;
   user_id: string;
-  type: 'preference' | 'config' | 'decision' | 'error' | 'discovery' | 'fact' | 'constraint' | 'pattern';
+  type: MemoryType;
   title: string;
   content: string;
   facts: string[];
   concepts: string[];
   /** manual = user "记住X"; auto = cron-distilled from raw conversations */
-  source: 'manual' | 'auto-promoted' | 'auto';
-  priority: 'high' | 'medium' | 'low';
+  source: MemorySource;
+  priority: MemoryPriority;
   status: 'active' | 'deprecated';
   usage_count: number;
   last_used_at: string | null;
@@ -32,6 +38,40 @@ export interface HardMemory {
   source_date: string | null;
   session_id?: string | null;
   timestamp: string;
+}
+
+/**
+ * Workspace-scoped memory. Same shape as a hard memory but isolated to one
+ * directory/project, so "this repo uses pnpm" never leaks into unrelated work.
+ */
+export interface WorkspaceMemory {
+  id?: number;
+  user_id: string;
+  workspace: string;
+  type: MemoryType;
+  title: string;
+  content: string;
+  facts: string[];
+  concepts: string[];
+  source: MemorySource;
+  status: 'active' | 'deprecated';
+  usage_count: number;
+  last_used_at: string | null;
+  source_date: string | null;
+  session_id?: string | null;
+  timestamp: string;
+}
+
+/** Rolling "what the user is working on right now" topic. */
+export interface RecentFocus {
+  id?: number;
+  user_id: string;
+  workspace: string | null;
+  topic: string;
+  detail: string;
+  weight: number;
+  last_seen: string;
+  created_at?: string;
 }
 
 export interface DailySummary {

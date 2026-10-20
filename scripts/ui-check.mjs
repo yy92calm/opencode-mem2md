@@ -36,18 +36,21 @@ await page.screenshot({ path: out, fullPage: true });
 
 // profile tab
 await page.click('.tab[data-page="profile"]');
-await page.waitForTimeout(400);
+await page.waitForFunction(() => {
+  const t = document.querySelector('#profileText')?.textContent || '';
+  return t.length > 0 && t !== '加载中…';
+}, { timeout: 5000 }).catch(() => {});
 await page.screenshot({ path: out.replace('.png', '-profile.png'), fullPage: true });
 const profileLen = await page.evaluate(() => document.querySelector('#profileText').textContent.length);
 
 // focus tab
 await page.click('.tab[data-page="focus"]');
-await page.waitForTimeout(400);
+await page.waitForTimeout(800);
 const focusCount = await page.evaluate(() => document.querySelectorAll('#focusList .focus-item').length);
 
 // hard search
 await page.click('.tab[data-page="hard"]');
-await page.waitForTimeout(500);
+await page.waitForTimeout(1200);
 const hardCount = await page.evaluate(() => document.querySelectorAll('#hardList .mem').length);
 
 console.log(JSON.stringify({ summary, profileLen, focusCount, hardCount, errors }, null, 2));

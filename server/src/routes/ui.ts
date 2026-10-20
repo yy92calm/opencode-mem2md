@@ -300,10 +300,12 @@ export const UI_HTML = `<!doctype html>
   }
 
   async function loadProfile() {
+    var box = $('#profileText');
+    if (!box.textContent) box.textContent = '加载中…';
     try {
       var p = await api('/api/profile');
-      $('#profileText').textContent = p.content || '暂无画像';
-    } catch (e) { $('#profileText').textContent = String(e.message || e); }
+      box.textContent = p.content || '暂无画像';
+    } catch (e) { box.textContent = String(e.message || e); }
   }
 
   async function loadFocus(all) {

@@ -12,6 +12,7 @@ import { memoryRoutes } from './routes/memory.js';
 import { profileRoutes } from './routes/profile.js';
 import { skillRoutes } from './routes/skills.js';
 import { workspaceRoutes } from './routes/workspace.js';
+import { UI_HTML } from './routes/ui.js';
 
 function log(level: string, msg: string, extra?: object) {
   console.log(JSON.stringify({ ts: new Date().toISOString(), level, scope: 'boot', msg, ...(extra || {}) }));
@@ -115,6 +116,12 @@ function bootstrap() {
 
   // All /api/* routes require bearer auth
   app.use('/api/*', authMiddleware);
+
+  // Read-only viewer. The page is static; it authenticates its own /api calls
+  // with the key from ?key= (or localStorage).
+  app.get('/ui', (c) => c.html(UI_HTML));
+  app.get('/', (c) => c.redirect('/ui'));
+  app.get('/favicon.ico', (c) => c.body(null, 204));
 
   app.route('/api/raw', rawRoutes);
   app.route('/api/memory', memoryRoutes);

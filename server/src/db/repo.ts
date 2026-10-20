@@ -438,6 +438,41 @@ export function countWorkspaceMemories(user_id: string, workspace: string): numb
   return row.c;
 }
 
+export interface WorkspaceSummary {
+  workspace: string;
+  memories: number;
+  raws: number;
+  last_seen: string;
+}
+
+/** Every workspace the user has touched, most recent first (for the UI). */
+export function listUserWorkspaces(user_id: string): WorkspaceSummary[] {
+  return getDb()
+    .prepare(`
+      WITH ws AS (
+        SELECT workspace FROM raw_conversations
+        WHERE user_id = @u AND workspace IS NOT NULL AND workspace != ''
+        UNION
+        SELECT workspace FROM workspace_memories
+        WHERE user_id = @u
+      )
+      SELECT
+        ws.workspace AS workspace,
+        (SELECT COUNT(*) FROM workspace_memories m
+          WHERE m.user_id = @u AND m.workspace = ws.workspace AND m.status = 'active') AS memories,
+        (SELECT COUNT(*) FROM raw_conversations r
+          WHERE r.user_id = @u AND r.workspace = ws.workspace) AS raws,
+        COALESCE(
+          (SELECT MAX(r.timestamp) FROM raw_conversations r WHERE r.user_id = @u AND r.workspace = ws.workspace),
+          (SELECT MAX(m.timestamp) FROM workspace_memories m WHERE m.user_id = @u AND m.workspace = ws.workspace),
+          ''
+        ) AS last_seen
+      FROM ws
+      ORDER BY last_seen DESC
+    `)
+    .all({ u: user_id }) as WorkspaceSummary[];
+}
+
 function deserializeWorkspaceMemory(row: any): WorkspaceMemory {
   return {
     ...row,
@@ -761,7 +796,12 @@ export function getStats(user_id: string): UserStats {
     profile_generated_at: profile?.generated_at ?? null,
     skill_drafts_pending: one(`SELECT COUNT(*) c FROM skill_drafts WHERE user_id = ? AND status = 'draft'`, user_id).c,
     skill_drafts_approved: one(`SELECT COUNT(*) c FROM skill_drafts WHERE user_id = ? AND status = 'approved'`, user_id).c,
-    workspaces: one(`SELECT COUNT(DISTINCT workspace) c FROM raw_conversations WHERE user_id = ? AND workspace IS NOT NULL`, user_id).c,
+    workspaces: one(`
+      SELECT COUNT(*) c FROM (
+        SELECT workspace FROM raw_conversations WHERE user_id = ? AND workspace IS NOT NULL AND workspace != ''
+        UNION SELECT workspace FROM workspace_memories WHERE user_id = ?
+      )
+    `, user_id, user_id).c,
     workspace_memories: one(`SELECT COUNT(*) c FROM workspace_memories WHERE user_id = ? AND status = 'active'`, user_id).c,
     focus_topics: one(`SELECT COUNT(*) c FROM recent_focus WHERE user_id = ?`, user_id).c,
     most_used_memories: db.prepare(`

@@ -5,6 +5,7 @@ import {
   searchWorkspaceMemories,
   touchWorkspaceUsage,
   countWorkspaceMemories,
+  listUserWorkspaces,
   listFocus,
   upsertFocus,
   getContextBundle,
@@ -21,6 +22,17 @@ const workspaceParam = (c: any): string | null => {
   const ws = c.req.query('workspace');
   return typeof ws === 'string' && ws.trim() ? ws.trim() : null;
 };
+
+/**
+ * GET /api/workspace/list
+ * Every workspace this user has touched, with memory/raw counts. Drives the
+ * workspace picker in the built-in UI.
+ */
+workspaceRoutes.get('/list', (c) => {
+  const user_id = c.get('user_id');
+  const items = listUserWorkspaces(user_id);
+  return c.json({ items, total: items.length });
+});
 
 /**
  * POST /api/workspace/memory

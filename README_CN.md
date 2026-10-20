@@ -64,6 +64,8 @@ npm run dev                                # 或 `docker compose up -d`
 
 完整部署和 API 文档见 [`server/README.md`](./server/README.md)。
 
+**内置查看界面：** 打开 `http://<host>:3777/ui`（或 `/ui?key=<api_key>` 免输入）。页面为只读，展示全部记忆层——统计、工作区记忆、硬性记忆、用户画像、最近关注——支持工作区切换和搜索。Key 保存在浏览器 localStorage，页面本身不含任何数据。
+
 ### 2. 安装插件
 
 ```bash

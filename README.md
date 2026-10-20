@@ -70,6 +70,8 @@ npm run dev                                # or `docker compose up -d`
 
 See [`server/README.md`](./server/README.md) for full deployment + API docs.
 
+**Built-in viewer:** open `http://<host>:3777/ui` (or `/ui?key=<api_key>` to skip the prompt). The page is read-only and shows every memory layer — stats, workspace memories, hard memories, profile, and recent focus — with a workspace picker and search. The key is stored in your browser's localStorage; the page itself contains no data.
+
 ### 2. Install the plugin
 
 ```bash

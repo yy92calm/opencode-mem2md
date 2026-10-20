@@ -129,7 +129,9 @@ CREATE TABLE IF NOT EXISTS raw_conversations (
 CREATE INDEX IF NOT EXISTS idx_raw_user_ts ON raw_conversations(user_id, timestamp DESC);
 CREATE INDEX IF NOT EXISTS idx_raw_session ON raw_conversations(session_id);
 CREATE INDEX IF NOT EXISTS idx_raw_user_date ON raw_conversations(user_id, date(timestamp));
-CREATE INDEX IF NOT EXISTS idx_raw_user_workspace_ts ON raw_conversations(user_id, workspace, timestamp DESC);
+-- NOTE: idx_raw_user_workspace_ts is created in migrate(), after the workspace
+-- column is guaranteed to exist. Creating it here breaks legacy DBs where the
+-- column is added by migration (CREATE INDEX fails before migrate() runs).
 
 -- Hard memories (user-triggered "remember X", high value)
 CREATE TABLE IF NOT EXISTS hard_memories (

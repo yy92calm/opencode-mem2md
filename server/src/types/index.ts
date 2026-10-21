@@ -143,6 +143,13 @@ export interface ServerConfig {
    * calendar day the user actually experienced. Default: host tz.
    */
   tz: string;
+  /**
+   * Language for LLM-generated memory content (daily summaries, atom
+   * memories, workspace memories, focus topics, profile). BCP-47 code,
+   * e.g. "zh-CN" (default), "zh-TW", "en", "ja". Code, paths, and product
+   * names are never translated.
+   */
+  memory_language: string;
   llm: LLMConfig;
   users: UserBinding[];
   cron: CronConfig;

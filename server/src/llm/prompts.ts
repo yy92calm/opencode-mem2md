@@ -1,5 +1,29 @@
 import { getLLM } from './client.js';
+import { getConfig } from '../config/index.js';
 import type { RawConversation, DailySummary, HardMemory } from '../types/index.js';
+
+/** Human-readable names for the languages people actually configure. */
+const LANGUAGE_NAMES: Record<string, string> = {
+  'zh-CN': 'Simplified Chinese (简体中文)',
+  'zh-TW': 'Traditional Chinese (繁體中文)',
+  en: 'English',
+  ja: 'Japanese (日本語)',
+  ko: 'Korean (한국어)',
+  fr: 'French (Français)',
+  de: 'German (Deutsch)',
+  es: 'Spanish (Español)',
+};
+
+/**
+ * Instruction appended to every generation prompt. Only natural-language
+ * fields are translated; identifiers must stay verbatim so memories remain
+ * copy-pasteable and searchable across languages.
+ */
+export function memoryLanguageDirective(): string {
+  const code = getConfig().memory_language || 'zh-CN';
+  const name = LANGUAGE_NAMES[code] ?? code;
+  return `Language: write ALL natural-language output (titles, content, facts, narrative, topics, decisions, problems, profile sections) in ${name}. Keep code, identifiers, file paths, commands, environment variables, and product/API names in their original form — do not translate or transliterate them.`;
+}
 
 const DAILY_SUMMARY_SYSTEM = `You analyze a developer's coding session conversations and produce a concise daily summary.
 
@@ -102,7 +126,7 @@ export async function generateDailySummary(
   const formatted = formatRawForLLM(raws).slice(0, 50000);
 
   const messages = [
-    { role: 'system' as const, content: DAILY_SUMMARY_SYSTEM },
+    { role: 'system' as const, content: `${DAILY_SUMMARY_SYSTEM}\n\n${memoryLanguageDirective()}` },
     {
       role: 'user' as const,
       content: `Date: ${date}\nUser: ${user_id}\n\nConversations:\n${formatted}\n\nReturn JSON only.`,
@@ -196,7 +220,7 @@ export async function extractAtoms(
     ? `\nAlready known (do NOT duplicate):\n${existingTitles.slice(0, 50).map(t => `- ${t}`).join('\n')}\n`
     : '';
   const response = await chatJson([
-    { role: 'system', content: EXTRACT_ATOMS_SYSTEM },
+    { role: 'system', content: `${EXTRACT_ATOMS_SYSTEM}\n\n${memoryLanguageDirective()}` },
     { role: 'user', content: `Date: ${date}\nUser: ${user_id}\n${knownBlock}\nConversations:\n${formatted}\n\nReturn JSON only.` },
   ], 0.2);
 
@@ -274,7 +298,7 @@ ${summariesText || '(none)'}
 Generate the profile now.`;
 
   const response = await getLLM().chat([
-    { role: 'system', content: PROFILE_SYSTEM },
+    { role: 'system', content: `${PROFILE_SYSTEM}\n\n${memoryLanguageDirective()}` },
     { role: 'user', content: userContent },
   ], {
     temperature: 0.3,
@@ -321,7 +345,7 @@ export async function consolidateMemories(memories: HardMemory[]): Promise<Conso
   ).join('\n\n');
 
   const response = await chatJson([
-    { role: 'system', content: CONSOLIDATE_SYSTEM },
+    { role: 'system', content: `${CONSOLIDATE_SYSTEM}\n\n${memoryLanguageDirective()}` },
     { role: 'user', content: `Memories:\n\n${listing}\n\nReturn JSON only.` },
   ], 0.1);
 
@@ -397,7 +421,7 @@ export async function extractSkill(user_id: string, session_id: string, raws: Ra
 
   const formatted = formatRawForLLM(raws).slice(0, 60000);
   const response = await chatJson([
-    { role: 'system', content: EXTRACT_SKILL_SYSTEM },
+    { role: 'system', content: `${EXTRACT_SKILL_SYSTEM}\n\n${memoryLanguageDirective()}` },
     { role: 'user', content: `User: ${user_id}\nSession: ${session_id}\n\nTranscript:\n${formatted}\n\nReturn JSON only.` },
   ], 0.3);
 

@@ -69,11 +69,35 @@ All `/api/*` endpoints require `Authorization: Bearer <api_key>`. The api_key re
 | GET    | `/api/memory/search?q=...&char_budget=8000&min_results=3` | Budgeted two-tier search: hard memories first, daily-summary fallback when under-filled; bumps `usage_count` of served items. Trigram FTS5 + LIKE fallback makes CJK queries work (≥3-char terms via MATCH, shorter terms via LIKE). |
 | PATCH  | `/api/memory/:id`           | Soft status transition `{status: active│deprecated}` |
 | DELETE | `/api/memory/:id`           | Delete one hard memory               |
+| POST   | `/api/memory/touch`         | `{ids, workspace_ids}` — count memories actually injected (recall accounting) |
 | GET    | `/api/memory/stats`         | Per-user store health: counts by source/status, profile freshness, pending skill drafts, most-recalled memories |
 | GET    | `/api/profile`              | Get current user profile (Markdown)  |
-| POST   | `/api/profile/regenerate`   | Manual trigger for current user (`scope: daily│weekly`) |
+| POST   | `/api/profile/regenerate`   | Manual trigger for current user (`scope: daily│weekly`, optional `date`) |
+| GET    | `/api/workspace/list`       | All workspaces with memory/raw counts + last activity |
+| POST   | `/api/workspace/memory`     | Insert a workspace-scoped memory     |
+| GET    | `/api/workspace/memory?workspace=...&limit=N` | List one workspace's active memories |
+| GET    | `/api/workspace/search?workspace=...&q=...` | FTS within one workspace |
+| GET    | `/api/workspace/focus?workspace=...&days=7` | Recent-focus topics (workspace + global) |
+| POST   | `/api/workspace/focus`      | Add/refresh a focus topic `{topic, workspace?, detail?}` |
+| GET    | `/api/workspace/context?workspace=...&days=7` | One round-trip for injection: profile + workspace memories + hard memories + focus |
+| GET    | `/ui`                       | Built-in read-only viewer (key from `?key=` or localStorage) |
 | GET    | `/api/skills/drafts?status=draft│approved` | List auto-distilled skill drafts |
 | POST   | `/api/skills/drafts/:id/approve` | Approve a draft (returns it for plugin install) |
+
+### Content language
+
+LLM-generated content (daily summaries, atom memories, workspace memories,
+focus topics, profile, skill drafts) follows `memory_language` in
+`config.yaml`:
+
+```yaml
+memory_language: zh-CN   # default; also accepts zh-TW, en, ja, ko, ...
+```
+
+Only natural language is translated — code, identifiers, paths, commands and
+product/API names stay verbatim. Changing it applies to newly generated
+content; run `POST /api/profile/regenerate` (or re-run a day's summary) to
+rewrite existing items.
 
 ### Raw upload payload
 

@@ -44,6 +44,12 @@ Workspace memories are keyed by absolute path, so the same title in another
 project does not collide. Re-asserting an existing title refreshes it instead
 of duplicating.
 
+## Language
+
+Write `title`, `content`, and `facts` in the user's language. Default to
+**简体中文** unless the user writes in another language or explicitly asks for
+one. Keep code, commands, paths, and product names verbatim.
+
 ## Notes
 
 - All memories belong to the authenticated user (`user_id` derived from API key).

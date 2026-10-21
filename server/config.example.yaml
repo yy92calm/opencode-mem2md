@@ -9,6 +9,13 @@ db_path: ./data/memory.db
 # otherwise daily summaries may bucket the wrong calendar day.
 tz: Asia/Shanghai
 
+# Language for LLM-generated memory content: daily summaries, atom memories,
+# workspace memories, focus topics, profile, skill drafts.
+# Defaults to Simplified Chinese. Any BCP-47 code works ("zh-CN", "zh-TW",
+# "en", "ja", "ko"). Code, paths, commands, and product names are never
+# translated.
+memory_language: zh-CN
+
 llm:
   # Works with any OpenAI-compatible endpoint:
   #   OpenAI      → https://api.openai.com/v1

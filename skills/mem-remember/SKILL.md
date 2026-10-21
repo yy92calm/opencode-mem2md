@@ -61,5 +61,6 @@ Reply: "✓ 已记住：项目用 Bun，不用 npm"
 
 ## Notes
 
+- Write memories in the user's language; default to **简体中文**.
 - The memory is stored on the Worker, available across all devices and sessions.
 - If the Worker is unreachable, the entry is cached locally and replayed on reconnect.

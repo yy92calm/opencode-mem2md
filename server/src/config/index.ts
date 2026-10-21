@@ -45,6 +45,33 @@ function parseExtraBody(v: unknown): Record<string, unknown> {
   return out;
 }
 
+/**
+ * Normalize the configured memory language. Accepts common aliases and falls
+ * back to the default (Simplified Chinese) when unset or malformed.
+ */
+function normalizeLanguage(v: unknown): string {
+  const DEFAULT = 'zh-CN';
+  if (v === undefined || v === null || v === '') return DEFAULT;
+  if (typeof v !== 'string') throw new Error('Config: memory_language must be a string (e.g. "zh-CN")');
+  const code = v.trim();
+
+  // Friendly aliases first, then strict BCP-47 validation.
+  const aliases: Record<string, string> = {
+    zh: 'zh-CN', 'zh-hans': 'zh-CN', 'zh-cn': 'zh-CN', cn: 'zh-CN', chinese: 'zh-CN',
+    'zh-hant': 'zh-TW', 'zh-tw': 'zh-TW', 'zh-hk': 'zh-TW',
+    en: 'en', 'en-us': 'en', 'en-gb': 'en', english: 'en',
+    ja: 'ja', jp: 'ja', japanese: 'ja',
+    ko: 'ko', kr: 'ko', korean: 'ko',
+  };
+  const alias = aliases[code.toLowerCase()];
+  if (alias) return alias;
+
+  if (!/^[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8})*$/.test(code)) {
+    throw new Error(`Config: invalid memory_language "${code}" (use a BCP-47 code like "zh-CN" or "en")`);
+  }
+  return code;
+}
+
 export function loadConfig(path: string = DEFAULT_CONFIG_PATH): ServerConfig {
   if (!existsSync(path)) {
     throw new Error(`Config file not found: ${path}. Copy config.example.yaml to config.yaml first.`);
@@ -107,6 +134,9 @@ export function loadConfig(path: string = DEFAULT_CONFIG_PATH): ServerConfig {
     port,
     db_path: expanded.db_path ?? './data/memory.db',
     tz,
+    // Language for generated memory content. Defaults to Simplified Chinese;
+    // anything BCP-47-ish is accepted and rendered verbatim in the prompt.
+    memory_language: normalizeLanguage(expanded.memory_language),
     llm: {
       provider: expanded.llm.provider ?? 'openai-compatible',
       base_url: expanded.llm.base_url ?? 'https://api.openai.com/v1',

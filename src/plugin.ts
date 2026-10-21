@@ -141,7 +141,7 @@ export default Plugin.define({
       // "remember X" — called by the mem-remember skill.
       editor.add({
         name: 'mem_capture',
-        description: 'Persist a hard memory (user explicitly asked to remember something)',
+        description: 'Persist a hard memory (user explicitly asked to remember something). Write title/content in the user\'s language — Simplified Chinese by default.',
         input: {
           type: 'object',
           properties: {
